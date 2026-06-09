@@ -1,4 +1,4 @@
-import { CONFIG_DIR } from './config.js';
+import { CONFIG_DIR, DEFAULT_UPSTREAM_BASE_URL } from './config.js';
 import { join } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'fs';
 
@@ -7,12 +7,12 @@ export const PROXY_PID_FILE    = join(CONFIG_DIR, 'auto-proxy.pid');
 export const PROXY_PORT        = Number.parseInt(process.env.BADGR_AUTO_PORT || '8787', 10);
 
 export const CONFIG_DEFAULTS = {
-  upstreamProvider: 'openai',
-  upstreamBaseUrl: process.env.BADGR_AUTO_MID_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-  edgeBaseUrl: process.env.BADGR_AUTO_EDGE_BASE_URL || '',
-  midBaseUrl: process.env.BADGR_AUTO_MID_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-  asyncBaseUrl: process.env.BADGR_AUTO_ASYNC_BASE_URL || '',
-  premiumBaseUrl: process.env.BADGR_AUTO_PREMIUM_BASE_URL || '',
+  upstreamProvider: 'badgr',
+  upstreamBaseUrl: DEFAULT_UPSTREAM_BASE_URL,
+  edgeBaseUrl: '',
+  midBaseUrl: DEFAULT_UPSTREAM_BASE_URL,
+  asyncBaseUrl: '',
+  premiumBaseUrl: '',
   edgeModel: process.env.BADGR_AUTO_EDGE_MODEL || 'local-small',
   midModel: process.env.BADGR_AUTO_MID_MODEL || 'gpt-4o-mini',
   asyncModel: process.env.BADGR_AUTO_ASYNC_MODEL || 'batch-oss',
@@ -23,15 +23,35 @@ export const CONFIG_DEFAULTS = {
   compressionThresholdTokens: 12000,
   recentMessagesToKeep: 8,
   summaryMaxTokens: 1600,
+  setupComplete: false,
+  routingMode: 'hybrid',
 };
 
-export function loadProxyConfig() {
-  if (!existsSync(PROXY_CONFIG_FILE)) return { ...CONFIG_DEFAULTS };
-  try {
-    return { ...CONFIG_DEFAULTS, ...JSON.parse(readFileSync(PROXY_CONFIG_FILE, 'utf8')) };
-  } catch {
-    return { ...CONFIG_DEFAULTS };
+const ENV_URL_KEYS = {
+  BADGR_AUTO_UPSTREAM_BASE_URL: 'upstreamBaseUrl',
+  BADGR_AUTO_MID_BASE_URL: 'midBaseUrl',
+  BADGR_AUTO_EDGE_BASE_URL: 'edgeBaseUrl',
+  BADGR_AUTO_ASYNC_BASE_URL: 'asyncBaseUrl',
+  BADGR_AUTO_PREMIUM_BASE_URL: 'premiumBaseUrl',
+};
+
+function envProxyOverrides() {
+  const overrides = {};
+  for (const [envKey, configKey] of Object.entries(ENV_URL_KEYS)) {
+    const value = process.env[envKey]?.trim();
+    if (value) overrides[configKey] = value.replace(/\/+$/, '');
   }
+  return overrides;
+}
+
+export function loadProxyConfig() {
+  let config = { ...CONFIG_DEFAULTS };
+  if (existsSync(PROXY_CONFIG_FILE)) {
+    try {
+      config = { ...config, ...JSON.parse(readFileSync(PROXY_CONFIG_FILE, 'utf8')) };
+    } catch { /* use defaults */ }
+  }
+  return { ...config, ...envProxyOverrides() };
 }
 
 export function saveProxyConfig(updates) {

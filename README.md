@@ -2,6 +2,8 @@
 
 **Local AI proxy for Cline, Continue, Aider, Ollama, LM Studio, and OpenAI-compatible tools. Reduce repeated tokens, compress long sessions, preserve streaming, and route requests intelligently.**
 
+[GitHub](https://github.com/michaelmanly/badgr-auto) · [Docs](https://aibadgr.com/docs/badgr-auto) · [AI Badgr](https://aibadgr.com)
+
 `badgr-auto` is an optional local proxy for [AI Badgr](https://aibadgr.com).
 
 It runs on your computer and gives coding tools a single OpenAI-compatible endpoint:
@@ -56,9 +58,13 @@ Sign in and copy your AI Badgr API key from the dashboard.
 
 ### 2. Install badgr-auto
 
+From npm:
+
 ```bash
 npm install -g badgr-auto
 ```
+
+Or from source: [github.com/michaelmanly/badgr-auto](https://github.com/michaelmanly/badgr-auto)
 
 ### 3. Connect your AI Badgr account
 
@@ -513,6 +519,12 @@ https://aibadgr.com
 ```
 
 ---
+
+## Links
+
+* **Source:** [github.com/michaelmanly/badgr-auto](https://github.com/michaelmanly/badgr-auto)
+* **Issues:** [github.com/michaelmanly/badgr-auto/issues](https://github.com/michaelmanly/badgr-auto/issues)
+* **Docs:** [aibadgr.com/docs/badgr-auto](https://aibadgr.com/docs/badgr-auto)
 
 ## License
 

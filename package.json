@@ -1,7 +1,7 @@
 {
   "name": "badgr-auto",
   "version": "0.1.1",
-  "description": "Badgr Token Proxy — a local OpenAI-compatible proxy that deduplicates, compresses, logs, and forwards LLM chat requests.",
+  "description": "Badgr Auto — local OpenAI-compatible proxy that optimizes context, routes to cheapest model, and logs savings. Works with Cline, Continue, Aider, and any OpenAI-compatible tool.",
   "type": "module",
   "bin": {
     "badgr-auto": "src/index.js"
@@ -10,6 +10,15 @@
     "start": "node src/index.js",
     "test": "vitest run"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/michaelmanly/badgr-auto.git"
+  },
+  "homepage": "https://aibadgr.com/docs/badgr-auto",
+  "bugs": {
+    "url": "https://github.com/michaelmanly/badgr-auto/issues"
+  },
+  "author": "AI Badgr <hello@aibadgr.com> (https://aibadgr.com)",
   "dependencies": {
     "@inquirer/prompts": "^8.5.2",
     "chalk": "^5.3.0"
@@ -22,13 +31,19 @@
   },
   "keywords": [
     "ai",
+    "llm",
+    "proxy",
+    "openai",
+    "ollama",
+    "lm-studio",
     "cline",
     "continue",
-    "ollama",
+    "aider",
     "local-llm",
+    "token-optimization",
+    "ai-router",
     "badgr",
-    "openai",
-    "proxy"
+    "cost-savings"
   ],
   "license": "MIT",
   "peerDependencies": {

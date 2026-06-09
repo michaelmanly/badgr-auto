@@ -2,11 +2,15 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { homedir } from 'os';
 import { join, dirname } from 'path';
 
-export const CONFIG_DIR  = join(homedir(), '.badgr');
+export const CONFIG_DIR = process.env.BADGR_CONFIG_DIR?.trim()
+  ? process.env.BADGR_CONFIG_DIR.trim()
+  : join(homedir(), '.badgr');
 export const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
 
+export const DEFAULT_UPSTREAM_BASE_URL = 'https://aibadgr.com/v1';
+
 export const DEFAULTS = {
-  baseUrl: 'https://aibadgr.com/v1',
+  baseUrl: DEFAULT_UPSTREAM_BASE_URL,
 };
 
 const LEGACY_BASE_URLS = new Set([

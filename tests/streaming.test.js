@@ -63,7 +63,9 @@ let proxyTestPort;
 async function launchProxy(mockPort) {
   process.env.BADGR_AUTO_UPSTREAM_BASE_URL = `http://127.0.0.1:${mockPort}/v1`;
   process.env.BADGR_AUTO_PORT = '0';  // bind to any free port
-  process.env.OPENAI_API_KEY = 'test-key';
+  process.env.BADGR_AUTO_API_KEY = 'test-key';
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.BADGR_API_KEY;
 
   // Dynamic import after env is set.
   const mod = await import('../src/proxy-server.js');

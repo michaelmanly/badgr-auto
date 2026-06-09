@@ -7,13 +7,14 @@
 
 import http from 'node:http';
 import { Readable } from 'node:stream';
-import { loadConfig } from './config.js';
+import { loadConfig, DEFAULT_UPSTREAM_BASE_URL } from './config.js';
 import { loadProxyConfig, PROXY_PORT } from './proxy-config.js';
 import { countTokens } from './token-counter.js';
 import { optimizeMessages } from './optimizer.js';
-import { estimateSavings } from './pricing.js';
+import { estimateSavings, estimateHaikuCost, estimateSonnetCost } from './pricing.js';
 import { saveRequestLog } from './db.js';
 import { routeRequest } from './router.js';
+import { trackRequest, trackError } from './analytics.js';
 
 function pushSavingsToBackend(entry) {
   const config = loadConfig();
@@ -52,22 +53,46 @@ function jsonResponse(res, statusCode, body, headers = {}) {
   res.end(JSON.stringify(body));
 }
 
-function getOpenAiKey() {
-  return process.env.OPENAI_API_KEY || process.env.BADGR_AUTO_API_KEY || loadConfig().apiKey || '';
+function extractBearer(headers = {}) {
+  const auth = headers.authorization || headers.Authorization;
+  if (typeof auth === 'string' && auth.toLowerCase().startsWith('bearer ')) {
+    return auth.slice(7).trim();
+  }
+  return '';
+}
+
+function isDirectOpenAiUpstream(baseUrl) {
+  try {
+    return new URL(baseUrl).hostname === 'api.openai.com';
+  } catch {
+    return false;
+  }
+}
+
+function getUpstreamApiKey(baseUrl, reqHeaders = {}) {
+  const clientKey = extractBearer(reqHeaders);
+  const badgrKey =
+    loadConfig().apiKey ||
+    process.env.BADGR_AUTO_API_KEY ||
+    process.env.BADGR_API_KEY ||
+    '';
+  if (isDirectOpenAiUpstream(baseUrl)) {
+    return process.env.OPENAI_API_KEY || clientKey || badgrKey || '';
+  }
+  return clientKey || badgrKey || '';
 }
 
 function getUpstreamBaseUrl(proxyConfig, overrideBaseUrl) {
   return (
     overrideBaseUrl ||
-    process.env.BADGR_AUTO_UPSTREAM_BASE_URL ||
     proxyConfig.upstreamBaseUrl ||
-    process.env.OPENAI_BASE_URL ||
-    'https://api.openai.com/v1'
+    proxyConfig.midBaseUrl ||
+    DEFAULT_UPSTREAM_BASE_URL
   ).replace(/\/+$/, '');
 }
 
-function upstreamHeaders(reqHeaders = {}) {
-  const key = getOpenAiKey();
+function upstreamHeaders(reqHeaders = {}, baseUrl) {
+  const key = getUpstreamApiKey(baseUrl, reqHeaders);
   return {
     'content-type': 'application/json',
     ...(key ? { authorization: `Bearer ${key}` } : {}),
@@ -83,7 +108,7 @@ async function forwardJson(path, body, reqHeaders = {}, overrideBaseUrl) {
     method: isGet ? 'GET' : 'POST',
     headers: {
       accept: 'application/json',
-      ...upstreamHeaders(reqHeaders),
+      ...upstreamHeaders(reqHeaders, base),
       ...(isGet ? {} : {}),
     },
     body: isGet ? undefined : JSON.stringify(body),
@@ -99,7 +124,7 @@ async function forwardStream(path, body, reqHeaders, overrideBaseUrl, signal) {
   const base = getUpstreamBaseUrl(proxyConfig, overrideBaseUrl);
   return fetch(`${base}${path}`, {
     method: 'POST',
-    headers: { ...upstreamHeaders(reqHeaders), accept: 'text/event-stream' },
+    headers: { ...upstreamHeaders(reqHeaders, base), accept: 'text/event-stream' },
     body: JSON.stringify(body),
     signal,
   });
@@ -115,14 +140,26 @@ const TIER_LABELS = {
 function logSavings(entry) {
   const tierLabel = TIER_LABELS[entry.routeTier] || entry.routeTier || 'unknown';
   const fallback = entry.routeFallbackUsed ? ` (fallback from ${entry.preferredTier})` : '';
-  const usd = entry.estimatedSavingsUsd.toFixed(4);
   const isLocal = entry.routeTier === 'edge';
+  const actualCost = entry.actualCostUsd;
+  const haikuCost = estimateHaikuCost(entry.optimizedTokens);
+  const sonnetCost = estimateSonnetCost(entry.optimizedTokens);
+  const savedVsHaiku = Math.max(haikuCost - actualCost, 0);
+  const savedVsSonnet = Math.max(sonnetCost - actualCost, 0);
+
+  // Token optimization section
+  const tokenDiff = entry.tokensSaved;
+  const tokenPct = entry.savedPercent.toFixed(0);
+  const tokenLine = tokenDiff > 0
+    ? `✓ Tokens: ${entry.originalTokens.toLocaleString()} → ${entry.optimizedTokens.toLocaleString()} (−${tokenDiff.toLocaleString()} tokens, ${tokenPct}%)`
+    : `✓ Tokens: ${entry.originalTokens.toLocaleString()} → ${entry.optimizedTokens.toLocaleString()}`;
 
   const lines = [
     `✓ Routed: ${tierLabel}${fallback}`,
-    `✓ Tokens: ${entry.originalTokens.toLocaleString()} → ${entry.optimizedTokens.toLocaleString()}`,
-    `✓ Saved:  ${entry.tokensSaved.toLocaleString()} tokens (${entry.savedPercent.toFixed(0)}%)`,
-    isLocal ? `✓ Cloud cost: $0.00` : `✓ Estimated saved: $${usd}`,
+    tokenLine,
+    isLocal ? `✓ Cloud cost: $0.00` : `✓ Actual cost: $${actualCost.toFixed(4)}`,
+    `✓ Estimated saved vs Claude Haiku:  $${savedVsHaiku.toFixed(4)}`,
+    `✓ Estimated saved vs Claude Sonnet: $${savedVsSonnet.toFixed(4)}`,
     `✓ Latency: ${entry.latencyMs}ms${entry.streaming ? ' (stream)' : ''}`,
   ];
   process.stderr.write(lines.join('\n') + '\n');
@@ -139,6 +176,8 @@ function buildBadgrHeaders(originalTokens, optimizedTokens, savings, route) {
 }
 
 function buildLogEntry(fields) {
+  const isLocal = fields.route.selectedTier === 'edge';
+  const actualCostUsd = isLocal ? 0 : fields.savings.optimizedCost;
   return {
     model: fields.model,
     originalTokens: fields.originalTokens,
@@ -146,6 +185,7 @@ function buildLogEntry(fields) {
     tokensSaved: fields.savings.savedTokens,
     savedPercent: fields.savings.savedPercent,
     estimatedSavingsUsd: fields.savings.savedCost,
+    actualCostUsd,
     latencyMs: fields.latencyMs,
     statusCode: fields.statusCode,
     routeTier: fields.route.selectedTier,
@@ -224,6 +264,9 @@ const server = http.createServer(async (req, res) => {
         const errText = await upstreamResponse.text().catch(() => '');
         let errData;
         try { errData = errText ? JSON.parse(errText) : {}; } catch { errData = { error: { message: errText, type: 'upstream_error' } }; }
+        if (upstreamResponse.status >= 500) {
+          trackError({ routeTier: route.selectedTier, model, statusCode: upstreamResponse.status, errorType: 'upstream_error', streaming: true, latencyMs: Date.now() - startedAt });
+        }
         jsonResponse(res, upstreamResponse.status, errData);
         return;
       }
@@ -261,6 +304,7 @@ const server = http.createServer(async (req, res) => {
       logSavings(entry);
       await saveRequestLog(entry);
       pushSavingsToBackend(entry);
+      trackRequest(entry);
       return;
     }
 
@@ -280,6 +324,10 @@ const server = http.createServer(async (req, res) => {
     logSavings(entry);
     await saveRequestLog(entry);
     pushSavingsToBackend(entry);
+    trackRequest(entry);
+    if (statusCode >= 500) {
+      trackError({ routeTier: route.selectedTier, model, statusCode, errorType: 'upstream_error', streaming: false, latencyMs });
+    }
     jsonResponse(res, statusCode, upstreamData, badgrHdrs);
     return;
   }

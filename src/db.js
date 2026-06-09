@@ -43,11 +43,12 @@ async function initDatabase() {
         streaming INTEGER NOT NULL DEFAULT 0
       )
     `);
-    // Migrate existing tables that are missing the streaming column.
-    try {
-      db.exec('ALTER TABLE request_logs ADD COLUMN streaming INTEGER NOT NULL DEFAULT 0');
-    } catch {
-      // Column already exists — expected on fresh installs.
+    // Migrate existing tables that are missing columns added after initial release.
+    for (const migration of [
+      'ALTER TABLE request_logs ADD COLUMN streaming INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE request_logs ADD COLUMN actual_cost_usd REAL NOT NULL DEFAULT 0',
+    ]) {
+      try { db.exec(migration); } catch { /* column already exists */ }
     }
     initialized = true;
   }
@@ -64,6 +65,7 @@ export async function saveRequestLog(entry) {
     tokens_saved: entry.tokensSaved,
     saved_percent: entry.savedPercent,
     estimated_savings_usd: entry.estimatedSavingsUsd,
+    actual_cost_usd: entry.actualCostUsd ?? 0,
     latency_ms: entry.latencyMs,
     status_code: entry.statusCode ?? null,
     route_tier: entry.routeTier || null,
@@ -82,13 +84,14 @@ export async function saveRequestLog(entry) {
       db.prepare(`
         INSERT INTO request_logs (
           created_at, model, original_tokens, optimized_tokens, tokens_saved,
-          saved_percent, estimated_savings_usd, latency_ms, status_code, route_tier,
+          saved_percent, estimated_savings_usd, actual_cost_usd, latency_ms, status_code, route_tier,
           preferred_tier, route_reason, route_fallback_used, latency_target_ms,
           deduped, compressed, streaming
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         row.created_at, row.model, row.original_tokens, row.optimized_tokens,
         row.tokens_saved, row.saved_percent, row.estimated_savings_usd,
+        row.actual_cost_usd,
         row.latency_ms, row.status_code, row.route_tier, row.preferred_tier,
         row.route_reason, row.route_fallback_used, row.latency_target_ms,
         row.deduped, row.compressed, row.streaming,
@@ -124,6 +127,7 @@ export async function readSavingsStats(period = 'all') {
           COALESCE(SUM(optimized_tokens), 0) AS total_optimized,
           COALESCE(SUM(tokens_saved), 0) AS total_saved,
           COALESCE(SUM(estimated_savings_usd), 0) AS total_usd,
+          COALESCE(SUM(actual_cost_usd), 0) AS total_actual_cost,
           COALESCE(AVG(saved_percent), 0) AS avg_saved_pct,
           COALESCE(AVG(latency_ms), 0) AS avg_latency_ms,
           COALESCE(SUM(CASE WHEN route_tier = 'edge' THEN 1 ELSE 0 END), 0) AS local_count,
@@ -163,7 +167,7 @@ function periodCutoff(period) {
 }
 
 function readStatsFromJsonl(cutoff) {
-  const zero = { requests: 0, total_original: 0, total_optimized: 0, total_saved: 0, total_usd: 0, avg_saved_pct: 0, avg_latency_ms: 0 };
+  const zero = { requests: 0, total_original: 0, total_optimized: 0, total_saved: 0, total_usd: 0, total_actual_cost: 0, avg_saved_pct: 0, avg_latency_ms: 0 };
   if (!existsSync(REQUEST_LOG_JSONL)) return zero;
 
   const lines = readFileSync(REQUEST_LOG_JSONL, 'utf8').trim().split('\n').filter(Boolean);
@@ -177,6 +181,7 @@ function readStatsFromJsonl(cutoff) {
     acc.total_optimized += r.optimized_tokens || 0;
     acc.total_saved += r.tokens_saved || 0;
     acc.total_usd += r.estimated_savings_usd || 0;
+    acc.total_actual_cost += r.actual_cost_usd || 0;
     acc.avg_saved_pct += r.saved_percent || 0;
     acc.avg_latency_ms += r.latency_ms || 0;
     acc.local_count   += (r.route_tier === 'edge'    ? 1 : 0);

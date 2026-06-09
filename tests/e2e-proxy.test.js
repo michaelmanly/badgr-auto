@@ -93,7 +93,9 @@ async function startProxy() {
   process.env.BADGR_AUTO_EDGE_BASE_URL     = base;
   process.env.BADGR_AUTO_PREMIUM_BASE_URL  = base;
   process.env.BADGR_AUTO_ASYNC_BASE_URL    = base;
-  process.env.OPENAI_API_KEY               = 'e2e-test-key';
+  process.env.BADGR_AUTO_API_KEY           = 'e2e-test-key';
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.BADGR_API_KEY;
   process.env.BADGR_AUTO_PORT              = String(proxyPort);
   process.env.BADGR_CONFIG_DIR             = configDir;
 
