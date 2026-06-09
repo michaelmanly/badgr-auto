@@ -15,14 +15,11 @@ http://localhost:8787/v1
 Point Cline, Continue, Aider, or another OpenAI-compatible client at that URL. `badgr-auto` optimizes request context, tracks estimated token savings, and chooses the most suitable route for each task.
 
 ```text
-Coding tool
-→ badgr-auto local proxy
-→ remove repeated context safely
-→ compress older context when needed
-→ classify request
-→ choose local, OSS cloud, or premium route
-→ stream response back
-→ log estimated savings
+Coding tool (one key: your AI Badgr API key)
+→ badgr-auto local proxy (dedupe · compress · route)
+→ AI Badgr cloud (https://aibadgr.com/v1) — Badgr-managed routing by default
+→ optional BYOK from dashboard (OpenAI, Anthropic, etc.) when you add Provider Keys
+→ stream response back · log savings
 ```
 
 ## Why use badgr-auto?
@@ -46,63 +43,30 @@ Long AI coding sessions often resend the same context repeatedly. That increases
 
 ## Quick start
 
-### 1. Create an AI Badgr account
-
-Go to:
-
-```text
-https://aibadgr.com/login
-```
-
-Sign in and copy your AI Badgr API key from the dashboard.
-
-### 2. Install badgr-auto
-
-From npm:
+Install once, then let the CLI guide you — **no account required to try local routing**.
 
 ```bash
 npm install -g badgr-auto
+badgr-auto start
 ```
 
 Or from source: [github.com/michaelmanly/badgr-auto](https://github.com/michaelmanly/badgr-auto)
 
-### 3. Connect your AI Badgr account
+### What `badgr-auto start` does (first run)
 
-```bash
-badgr-auto login
-```
+Runs only when you have **no saved AI Badgr API key** yet. If you already connected, `start` launches the proxy immediately.
 
-Paste your AI Badgr API key when prompted.
+1. **Choose routing mode** — Local only, or Local + cloud (recommended)
+2. **Detect local models** — scans Ollama (`:11434`) and LM Studio (`:1234`)
+3. **Run a local test** — only when Ollama or LM Studio is running; shows token savings before any signup
+4. **Cloud escalation** — if you chose Local + cloud, prompts for your AI Badgr API key inline when cloud routing is needed
+5. **Start the proxy** at `http://localhost:8787/v1`
 
-Your key is validated and stored locally in:
+**No local server?** Local-only mode exits with install hints. Local + cloud continues with **cloud-only routing** until you add Ollama or LM Studio.
 
-```text
-~/.badgr/config.json
-```
+You only need `badgr-auto login` separately if you skipped the key during setup, or to update your key later.
 
-### 4. Start the local proxy
-
-```bash
-badgr-auto start
-```
-
-After login, the proxy routes through your saved AI Badgr endpoint (`https://aibadgr.com/v1`) automatically.
-
-You should see:
-
-```text
-✓ Badgr Auto running at http://localhost:8787/v1
-```
-
-To use a different upstream instead, pass `--upstream`:
-
-```bash
-badgr-auto start --upstream https://api.openai.com/v1
-```
-
-### 5. Connect your coding tool
-
-Use:
+### Connect your coding tool
 
 ```text
 Base URL: http://localhost:8787/v1
@@ -110,9 +74,29 @@ API Key:  <YOUR_BADGR_API_KEY>
 Model:    badgr-auto
 ```
 
-The proxy uses the API key saved by `badgr-auto login` for upstream authentication. Your coding tool still needs an API key field filled in — use the same AI Badgr key.
+Use the same AI Badgr API key you copied from the dashboard. That is the **only** key your coding tool needs.
 
-Then use your coding tool normally.
+---
+
+## How keys work (important)
+
+`badgr-auto` does **not** ask for your OpenAI, Anthropic, or Claude API keys.
+
+| What | Where you set it |
+| ---- | ---------------- |
+| **AI Badgr API key** | `badgr-auto login`, guided setup, or your tool's API key field |
+| **OpenAI / Anthropic / other provider keys** | [AI Badgr dashboard](https://aibadgr.com/dashboard) → **Provider Keys** (BYOK passthrough) |
+
+Flow:
+
+1. Sign in at [aibadgr.com](https://aibadgr.com/login).
+2. Add your provider keys in the dashboard (optional BYOK — routes through your own OpenAI/Anthropic accounts when configured).
+3. Copy your **AI Badgr API key** from the dashboard.
+4. Paste that key into `badgr-auto` (during `badgr-auto start` or `badgr-auto login`) and into Cline / Continue / Aider.
+
+Cloud requests go: **your tool → badgr-auto → AI Badgr** (Badgr-managed by default). If you add **Provider Keys** in the dashboard, matching requests can use your own OpenAI/Anthropic accounts (optional BYOK). You never paste provider keys into the terminal or into `badgr-auto` config.
+
+Local-only mode (Ollama / LM Studio) can run with **no AI Badgr account** — cloud routing and dashboard sync unlock when you connect your Badgr key.
 
 ---
 
@@ -125,6 +109,8 @@ Base URL: http://localhost:8787/v1
 API Key:  <YOUR_BADGR_API_KEY>
 Model ID: badgr-auto
 ```
+
+Provider keys (OpenAI, Anthropic, etc.) are managed in the [AI Badgr dashboard](https://aibadgr.com/dashboard), not in Cline.
 
 ---
 
@@ -141,22 +127,21 @@ models:
     apiKey: <YOUR_BADGR_API_KEY>
 ```
 
+Provider keys (OpenAI, Anthropic, etc.) are managed in the [AI Badgr dashboard](https://aibadgr.com/dashboard), not in Continue config.
+
 ---
 
 ## Aider setup
 
-Set the OpenAI-compatible API base URL:
+Aider uses env vars named `OPENAI_*` for compatibility — set them to the **proxy** and your **AI Badgr key** (not a raw OpenAI key):
 
 ```bash
 export OPENAI_API_BASE=http://localhost:8787/v1
 export OPENAI_API_KEY=<YOUR_BADGR_API_KEY>
-```
-
-Then use:
-
-```bash
 aider --model badgr-auto
 ```
+
+Add OpenAI/Anthropic keys in the [AI Badgr dashboard](https://aibadgr.com/dashboard) under Provider Keys if you use BYOK passthrough.
 
 ---
 
@@ -173,7 +158,7 @@ It evaluates each task and chooses the cheapest suitable route.
 | **Premium**      | Complex or critical tasks | deep debugging, reasoning, final outputs |
 | **Async GPU**    | Background workloads      | embeddings, indexing, batch evals        |
 
-Async GPU execution is planned for a later release. The current alpha focuses on edge, mid-tier, and premium routing.
+Async GPU execution is planned for a later release. Current routing focuses on edge, mid-tier, and premium tiers.
 
 If a preferred tier is not configured (for example, no local edge endpoint), `badgr-auto` falls back to the next available tier.
 
@@ -286,18 +271,32 @@ badgr-auto stats all
 Example:
 
 ```text
-Token savings — Last 7 days
+Estimated savings — Last 7 days
 
-Requests:          1,234
-Original tokens:   4,890,120
-Optimized tokens:  2,912,450
-Tokens saved:      1,977,670
-Average reduction: 40.4%
-Estimated saved:   $12.34
-Local requests:    38%
-OSS cloud:         52%
-Premium:           10%
-Avg latency:       312ms
+Token optimisation
+
+Requests:               1,234
+Original tokens:        4,890,120
+Optimized tokens:       2,912,450
+Tokens removed:         1,977,670
+Average context reduction: 40.4%
+
+Routing savings
+
+Actual cost:            $4.20
+
+Cost using Claude Haiku:  $12.80
+Cost using Claude Sonnet: $48.50
+
+Saved vs Claude Haiku:  $8.60
+Saved vs Claude Sonnet: $44.30
+
+Requests routed:
+  Local:            38%
+  OSS cloud:        52%
+  Premium:          10%
+
+Avg latency:            312ms
 ```
 
 Savings estimates are informational. Actual provider pricing may vary.
@@ -309,16 +308,16 @@ When logged in, savings are also sent to your AI Badgr account in the background
 ## Commands
 
 ```bash
-badgr-auto login
-```
-
-Connect your local proxy to your AI Badgr account.
-
-```bash
 badgr-auto start
 ```
 
-Start the local OpenAI-compatible proxy.
+Start the proxy. First run launches **guided setup** (routing mode, local models, optional Badgr key).
+
+```bash
+badgr-auto login
+```
+
+Save or update your **AI Badgr API key** (not OpenAI/Claude keys — those go in the dashboard).
 
 ```bash
 badgr-auto stop
@@ -386,7 +385,9 @@ API Key:  <YOUR_BADGR_API_KEY>
 Model:    badgr-auto
 ```
 
-Use the localhost endpoint only when you want local optimization, token savings, and optional local-model routing.
+Same key model: one Badgr API key in your tool; OpenAI/Anthropic keys in the dashboard for BYOK.
+
+Use the localhost endpoint when you want local optimization, token savings, and optional local-model routing.
 
 | Mode                  | Base URL                         |
 | --------------------- | -------------------------------- |
@@ -427,26 +428,17 @@ Proxy configuration is stored in `~/.badgr/auto-config.json`.
 
 ---
 
-## Alpha status
+## Status
 
-`badgr-auto` is currently an alpha release (v0.1.0).
+Current release (v0.1.x) includes:
 
-The alpha focuses on:
-
-* OpenAI-compatible local proxy support
-* token deduplication
-* long-context compression
+* OpenAI-compatible local proxy
+* token deduplication and long-context compression
 * SSE streaming passthrough
 * edge, OSS, and premium routing
-* local savings statistics
+* local savings statistics and dashboard sync
 
-Planned improvements include:
-
-* async GPU-job execution
-* dashboard savings widgets
-* more routing controls
-* easier setup integrations
-* additional local-model providers
+Planned: async GPU jobs, more routing controls, additional local-model providers.
 
 ---
 
@@ -482,11 +474,11 @@ badgr-auto
 
 ### API key is missing
 
-Run:
+Run `badgr-auto login` and paste your **AI Badgr API key** from the [dashboard](https://aibadgr.com/dashboard).
 
-```bash
-badgr-auto login
-```
+### Cloud models fail or wrong provider
+
+Check **Provider Keys** in the [AI Badgr dashboard](https://aibadgr.com/dashboard). Add or update your OpenAI, Anthropic, or other BYOK keys there — not in `badgr-auto`.
 
 ### Use AI Badgr without the proxy
 

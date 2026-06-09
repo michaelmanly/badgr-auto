@@ -9,6 +9,7 @@ import {
 import { loadConfig, saveConfig, DEFAULTS } from '../config.js';
 import { detectLocalServers } from '../detect.js';
 import { detectHardware } from '../hardware.js';
+import { probeProxy } from '../probe-proxy.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -26,26 +27,6 @@ function parseArgs(args) {
     if (args[i] === '--recent' && args[i + 1]) updates.recentMessagesToKeep = Number.parseInt(args[++i], 10);
   }
   return updates;
-}
-
-/** Send one chat request to the proxy and return {ok, route, tokensBefore, tokensAfter}. */
-async function probeProxy(proxyPort, prompt) {
-  try {
-    const res = await fetch(`http://localhost:${proxyPort}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: 'Bearer test' },
-      body: JSON.stringify({ model: 'badgr-auto', messages: [{ role: 'user', content: prompt }] }),
-      signal: AbortSignal.timeout(15_000),
-    });
-    return {
-      ok: res.status < 500,
-      route: res.headers.get('x-badgr-route-tier') || '—',
-      tokensBefore: Number.parseInt(res.headers.get('x-badgr-original-tokens') || '0', 10),
-      tokensAfter: Number.parseInt(res.headers.get('x-badgr-optimized-tokens') || '0', 10),
-    };
-  } catch {
-    return { ok: false, route: '—', tokensBefore: 0, tokensAfter: 0 };
-  }
 }
 
 function launchProxyProcess() {
@@ -149,8 +130,16 @@ export async function startCommand(chalk, args = []) {
 
     if (primary.models.length) {
       const preferredOrder = hw.recommended?.name ? [hw.recommended.name, 'qwen2.5-coder:7b', 'llama3.2:8b', 'llama3.1:8b', 'mistral:7b'] : ['qwen2.5-coder:7b', 'llama3.2:8b'];
-      const best = preferredOrder.find(m => primary.models.some(pm => pm === m || pm.startsWith(m.split(':')[0])));
-      localModel = best || primary.models[0];
+      const defaultModel = preferredOrder.find(m => primary.models.some(pm => pm === m || pm.startsWith(m.split(':')[0]))) || primary.models[0];
+      if (primary.models.length > 1) {
+        localModel = await select({
+          message: '  Select a local model for simple tasks:',
+          choices: primary.models.map(m => ({ name: m, value: m })),
+          default: defaultModel,
+        });
+      } else {
+        localModel = primary.models[0];
+      }
       console.log(`  Using local model: ${chalk.cyan(localModel)}`);
       console.log();
     }
@@ -284,7 +273,11 @@ export async function startCommand(chalk, args = []) {
         // Step 6 — run a cloud test probe
         console.log('  Testing AI Badgr cloud route…');
         console.log();
-        const cloudResult = await probeProxy(PROXY_PORT, 'Review this backend architecture for security risks. List the top 3 concerns.');
+        const cloudResult = await probeProxy(
+          PROXY_PORT,
+          'Review this backend architecture for security risks. List the top 3 concerns.',
+          { apiKey: saved.apiKey },
+        );
         if (cloudResult.ok) {
           console.log(chalk.green('  ✓ Route: premium model'));
           console.log(chalk.green('  ✓ Response received'));

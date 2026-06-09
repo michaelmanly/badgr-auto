@@ -17,8 +17,9 @@ ${chalk.bold('MVP FLOW')}
   Supports both streaming (text/event-stream) and buffered JSON.
 
 ${chalk.bold('SETUP')}
-  ${chalk.cyan('export OPENAI_API_KEY=sk-...')}       Use your upstream API key
-  ${chalk.cyan('badgr-auto start')}                   Start proxy at localhost:${PROXY_PORT}
+  ${chalk.cyan('npm install -g badgr-auto')}           Install (once)
+  ${chalk.cyan('badgr-auto start')}                   Guided setup + proxy at localhost:${PROXY_PORT}
+  ${chalk.cyan('badgr-auto login')}                   Connect AI Badgr (when cloud routing needed)
   ${chalk.cyan('badgr-auto stop')}                    Stop the proxy
   ${chalk.cyan('badgr-auto status')}                  Show proxy status
 
@@ -28,7 +29,7 @@ ${chalk.bold('OPENAI-COMPATIBLE ENDPOINTS')}
 
 ${chalk.bold('CONFIGURE CODING TOOLS')}
   Base URL: ${chalk.cyan(`http://localhost:${PROXY_PORT}/v1`)}
-  API Key:  ${chalk.dim('your normal OPENAI_API_KEY')}
+  API Key:  ${chalk.dim('your AI Badgr API key (after cloud setup)')}
   Model:    ${chalk.cyan('badgr-auto')} (or your normal model)
 
 ${chalk.bold('SAVINGS')}
