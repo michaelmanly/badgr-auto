@@ -109,12 +109,12 @@ async function startProxy() {
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────
 
-function send(body) {
+function send(body, extraHeaders = {}) {
   const payload = JSON.stringify(body);
   return new Promise((resolve, reject) => {
     const req = http.request(
       { hostname: '127.0.0.1', port: proxyPort, path: '/v1/chat/completions', method: 'POST',
-        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } },
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), ...extraHeaders } },
       (res) => {
         const raw = [];
         res.on('data', c => raw.push(c));
@@ -211,16 +211,18 @@ describe('context optimisation', () => {
     expect(saved).toBeGreaterThan(0);
   });
 
-  it('compresses long context — optimized < original tokens', async () => {
-    const longChunk = 'word '.repeat(3000);
+  it('deduplicates repeated code block attachments — optimized < original tokens', async () => {
+    // A repeated fenced code block is a provably redundant data block and should be removed.
+    // Natural-language messages are intentionally NOT deduplicated (per spec §4).
+    const codeBlock = '```typescript\n' + 'export const compute = (n: number): number => n * 2;\n'.repeat(40) + '```';
     const res = await send({
       model: 'badgr-auto',
       messages: [
         { role: 'system', content: 'You are helpful.' },
-        { role: 'user', content: longChunk },
+        { role: 'user', content: codeBlock },
         { role: 'assistant', content: 'OK' },
-        { role: 'user', content: longChunk },
-        { role: 'user', content: 'Summarise.' },
+        { role: 'user', content: codeBlock }, // exact duplicate code block — removed
+        { role: 'user', content: 'Fix the bug.' },
       ],
     });
     expect(res.status).toBe(200);
@@ -228,6 +230,59 @@ describe('context optimisation', () => {
     const orig = Number.parseInt(res.headers['x-badgr-original-tokens'] || '0', 10);
     const opt  = Number.parseInt(res.headers['x-badgr-optimized-tokens'] || '0', 10);
     expect(orig).toBeGreaterThan(opt);
+  });
+});
+
+describe('optimization mode: off', () => {
+  const codeBlock = '```typescript\n' + 'export const compute = (n: number): number => n * 2;\n'.repeat(40) + '```';
+  const duplicateMessages = [
+    { role: 'user', content: codeBlock },
+    { role: 'assistant', content: 'OK' },
+    { role: 'user', content: codeBlock },
+    { role: 'user', content: 'Fix the bug.' },
+  ];
+
+  it('X-Badgr-Mode: off passes duplicate code blocks through unchanged', async () => {
+    const res = await send({ model: 'badgr-auto', messages: duplicateMessages }, { 'x-badgr-mode': 'off' });
+    const orig = Number.parseInt(res.headers['x-badgr-original-tokens'] || '0', 10);
+    const opt = Number.parseInt(res.headers['x-badgr-optimized-tokens'] || '0', 10);
+    const saved = Number.parseInt(res.headers['x-badgr-tokens-saved'] || '0', 10);
+    expect(saved).toBe(0);
+    expect(opt).toBe(orig);
+  });
+
+  it('badgr_mode: off in body passes messages through unchanged', async () => {
+    const res = await send({ model: 'badgr-auto', badgr_mode: 'off', messages: duplicateMessages });
+    const saved = Number.parseInt(res.headers['x-badgr-tokens-saved'] || '0', 10);
+    expect(saved).toBe(0);
+  });
+
+  it('metadata.mode: off in body passes messages through unchanged', async () => {
+    const res = await send({ model: 'badgr-auto', metadata: { mode: 'off' }, messages: duplicateMessages });
+    const saved = Number.parseInt(res.headers['x-badgr-tokens-saved'] || '0', 10);
+    expect(saved).toBe(0);
+  });
+
+  it('mode off still routes normally (refactor → mid tier)', async () => {
+    const res = await send(
+      { model: 'badgr-auto', messages: [{ role: 'user', content: 'Please refactor this function to use async/await.' }] },
+      { 'x-badgr-mode': 'off' },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers['x-badgr-route-tier']).toBe('mid');
+  });
+
+  it('mode off still routes normally (autocomplete → edge tier)', async () => {
+    const res = await send(
+      {
+        model: 'badgr-auto',
+        metadata: { task_type: 'autocomplete' },
+        messages: [{ role: 'user', content: 'complete this line' }],
+      },
+      { 'x-badgr-mode': 'off' },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers['x-badgr-route-tier']).toBe('edge');
   });
 });
 

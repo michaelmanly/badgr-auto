@@ -49,6 +49,10 @@ async function initDatabase() {
       'ALTER TABLE request_logs ADD COLUMN actual_cost_usd REAL NOT NULL DEFAULT 0',
       'ALTER TABLE request_logs ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0',
       'ALTER TABLE request_logs ADD COLUMN client_profile TEXT',
+      'ALTER TABLE request_logs ADD COLUMN context_tokens_removed INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE request_logs ADD COLUMN estimated_savings_vs_haiku REAL NOT NULL DEFAULT 0',
+      'ALTER TABLE request_logs ADD COLUMN estimated_savings_vs_sonnet REAL NOT NULL DEFAULT 0',
+      'ALTER TABLE request_logs ADD COLUMN estimated_cache_eligible_tokens INTEGER NOT NULL DEFAULT 0',
     ]) {
       try { db.exec(migration); } catch { /* column already exists */ }
     }
@@ -69,6 +73,10 @@ export async function saveRequestLog(entry) {
     estimated_savings_usd: entry.estimatedSavingsUsd,
     actual_cost_usd: entry.actualCostUsd ?? 0,
     cached_tokens: entry.cachedTokens ?? 0,
+    context_tokens_removed: entry.contextTokensRemoved ?? 0,
+    estimated_savings_vs_haiku: entry.estimatedSavingsVsHaiku ?? 0,
+    estimated_savings_vs_sonnet: entry.estimatedSavingsVsSonnet ?? 0,
+    estimated_cache_eligible_tokens: entry.estimatedCacheEligibleTokens ?? 0,
     client_profile: entry.clientProfile || null,
     latency_ms: entry.latencyMs,
     status_code: entry.statusCode ?? null,
@@ -88,15 +96,19 @@ export async function saveRequestLog(entry) {
       db.prepare(`
         INSERT INTO request_logs (
           created_at, model, original_tokens, optimized_tokens, tokens_saved,
-          saved_percent, estimated_savings_usd, actual_cost_usd, cached_tokens, client_profile,
+          saved_percent, estimated_savings_usd, actual_cost_usd, cached_tokens,
+          context_tokens_removed, estimated_savings_vs_haiku, estimated_savings_vs_sonnet,
+          estimated_cache_eligible_tokens, client_profile,
           latency_ms, status_code, route_tier,
           preferred_tier, route_reason, route_fallback_used, latency_target_ms,
           deduped, compressed, streaming
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         row.created_at, row.model, row.original_tokens, row.optimized_tokens,
         row.tokens_saved, row.saved_percent, row.estimated_savings_usd,
-        row.actual_cost_usd, row.cached_tokens, row.client_profile,
+        row.actual_cost_usd, row.cached_tokens,
+        row.context_tokens_removed, row.estimated_savings_vs_haiku, row.estimated_savings_vs_sonnet,
+        row.estimated_cache_eligible_tokens, row.client_profile,
         row.latency_ms, row.status_code, row.route_tier, row.preferred_tier,
         row.route_reason, row.route_fallback_used, row.latency_target_ms,
         row.deduped, row.compressed, row.streaming,
@@ -131,9 +143,13 @@ export async function readSavingsStats(period = 'all') {
           COALESCE(SUM(original_tokens), 0) AS total_original,
           COALESCE(SUM(optimized_tokens), 0) AS total_optimized,
           COALESCE(SUM(tokens_saved), 0) AS total_saved,
+          COALESCE(SUM(context_tokens_removed), 0) AS total_context_tokens_removed,
           COALESCE(SUM(estimated_savings_usd), 0) AS total_usd,
           COALESCE(SUM(actual_cost_usd), 0) AS total_actual_cost,
           COALESCE(SUM(cached_tokens), 0) AS total_cached,
+          COALESCE(SUM(estimated_cache_eligible_tokens), 0) AS total_estimated_cache_eligible,
+          COALESCE(SUM(estimated_savings_vs_haiku), 0) AS total_saved_vs_haiku,
+          COALESCE(SUM(estimated_savings_vs_sonnet), 0) AS total_saved_vs_sonnet,
           COALESCE(AVG(saved_percent), 0) AS avg_saved_pct,
           COALESCE(AVG(latency_ms), 0) AS avg_latency_ms,
           COALESCE(SUM(CASE WHEN route_tier = 'edge' THEN 1 ELSE 0 END), 0) AS local_count,
@@ -173,7 +189,7 @@ function periodCutoff(period) {
 }
 
 function readStatsFromJsonl(cutoff) {
-  const zero = { requests: 0, total_original: 0, total_optimized: 0, total_saved: 0, total_usd: 0, total_actual_cost: 0, total_cached: 0, avg_saved_pct: 0, avg_latency_ms: 0 };
+  const zero = { requests: 0, total_original: 0, total_optimized: 0, total_saved: 0, total_context_tokens_removed: 0, total_usd: 0, total_actual_cost: 0, total_cached: 0, total_estimated_cache_eligible: 0, total_saved_vs_haiku: 0, total_saved_vs_sonnet: 0, avg_saved_pct: 0, avg_latency_ms: 0 };
   if (!existsSync(REQUEST_LOG_JSONL)) return zero;
 
   const lines = readFileSync(REQUEST_LOG_JSONL, 'utf8').trim().split('\n').filter(Boolean);
@@ -186,9 +202,13 @@ function readStatsFromJsonl(cutoff) {
     acc.total_original += r.original_tokens || 0;
     acc.total_optimized += r.optimized_tokens || 0;
     acc.total_saved += r.tokens_saved || 0;
+    acc.total_context_tokens_removed += r.context_tokens_removed || 0;
     acc.total_usd += r.estimated_savings_usd || 0;
     acc.total_actual_cost += r.actual_cost_usd || 0;
     acc.total_cached += r.cached_tokens || 0;
+    acc.total_estimated_cache_eligible += r.estimated_cache_eligible_tokens || 0;
+    acc.total_saved_vs_haiku += r.estimated_savings_vs_haiku || 0;
+    acc.total_saved_vs_sonnet += r.estimated_savings_vs_sonnet || 0;
     acc.avg_saved_pct += r.saved_percent || 0;
     acc.avg_latency_ms += r.latency_ms || 0;
     acc.local_count   += (r.route_tier === 'edge'    ? 1 : 0);

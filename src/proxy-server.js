@@ -63,6 +63,33 @@ function extractBearer(headers = {}) {
   return '';
 }
 
+function normalizeOptimizationMode(value) {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'off' || normalized === 'none' || normalized === 'disabled') return 'off';
+  return undefined;
+}
+
+/**
+ * Resolve per-request token optimization mode.
+ * Does NOT affect routing — routeRequest() runs independently and always selects
+ * local / OSS cloud / premium tiers as usual.
+ */
+export function resolveOptimizationMode(requestData = {}, headers = {}, proxyConfig = {}) {
+  const headerMode = normalizeOptimizationMode(headers['x-badgr-mode']);
+  if (headerMode) return headerMode;
+
+  const bodyMode = normalizeOptimizationMode(
+    requestData.badgr_mode ||
+    requestData.badgrMode ||
+    requestData.metadata?.mode ||
+    requestData.metadata?.badgr_mode,
+  );
+  if (bodyMode) return bodyMode;
+
+  return normalizeOptimizationMode(proxyConfig.optimizationMode);
+}
+
 function isDirectOpenAiUpstream(baseUrl) {
   try {
     return new URL(baseUrl).hostname === 'api.openai.com';
@@ -133,45 +160,40 @@ async function forwardStream(path, body, reqHeaders, overrideBaseUrl, signal) {
 }
 
 const TIER_LABELS = {
-  edge:    'local model',
-  mid:     'mid-tier OSS',
+  edge:    'Local',
+  mid:     'OSS cloud',
   async:   'async GPU',
-  premium: 'premium (Claude)',
+  premium: 'Premium',
 };
 
 function logSavings(entry) {
   const tierLabel = TIER_LABELS[entry.routeTier] || entry.routeTier || 'unknown';
   const fallback = entry.routeFallbackUsed ? ` (fallback from ${entry.preferredTier})` : '';
   const isLocal = entry.routeTier === 'edge';
-  const actualCost = entry.actualCostUsd;
-  const sonnetCost = estimateSonnetCost(entry.optimizedTokens);
-  const savedVsSonnet = Math.max(sonnetCost - actualCost, 0);
 
   const lines = [];
 
-  // 1. Context optimization
-  const removed = entry.contextTokensRemoved ?? entry.tokensSaved;
+  lines.push(`✓ Route: ${tierLabel}${fallback}`);
+  lines.push(`✓ Context: ${entry.originalTokens.toLocaleString()} → ${entry.optimizedTokens.toLocaleString()} tokens`);
+
+  const removed = entry.contextTokensRemoved ?? 0;
   if (removed > 0) {
-    lines.push(`✓ Context optimization: ${removed.toLocaleString()} tokens safely removed`);
-  } else {
-    lines.push(`✓ Context optimization: no changes (${entry.originalTokens.toLocaleString()} tokens)`);
+    const pct = entry.originalTokens > 0 ? Math.round((removed / entry.originalTokens) * 100) : 0;
+    lines.push(`✓ Safely removed: ${removed.toLocaleString()} tokens (${pct}%)`);
   }
 
-  // 2. Prompt caching — only report when upstream confirms it
+  // Only report confirmed cache tokens — never estimate cache savings without upstream confirmation.
   if (typeof entry.cachedTokens === 'number' && entry.cachedTokens > 0) {
-    lines.push(`✓ Prompt caching: ${entry.cachedTokens.toLocaleString()} cached input tokens (upstream)`);
-  } else if (!entry.streaming) {
-    lines.push(`✓ Prompt caching: none reported by upstream`);
+    lines.push(`✓ Confirmed cached input: ${entry.cachedTokens.toLocaleString()} tokens`);
   }
 
-  // 3. Routing savings
-  lines.push(
-    isLocal
-      ? `✓ Routing savings: $0.00 cloud cost (local model)`
-      : `✓ Routing savings: $${savedVsSonnet.toFixed(4)} estimated saved vs Claude Sonnet`,
-  );
-  lines.push(`✓ Actual route: ${tierLabel}${fallback}`);
-  lines.push(`✓ Latency: ${entry.latencyMs}ms${entry.streaming ? ' (stream)' : ''}`);
+  lines.push(`✓ Actual cost: $${entry.actualCostUsd.toFixed(4)}`);
+
+  if (!isLocal && entry.estimatedSavingsVsSonnet > 0) {
+    lines.push(`✓ Estimated saved vs Claude Sonnet: $${entry.estimatedSavingsVsSonnet.toFixed(4)}`);
+  }
+
+  lines.push(`  (${entry.latencyMs}ms${entry.streaming ? ', stream' : ''})`);
 
   process.stderr.write(lines.join('\n') + '\n');
 }
@@ -202,15 +224,33 @@ function extractCachedTokens(responseData) {
 function buildLogEntry(fields) {
   const isLocal = fields.route.selectedTier === 'edge';
   const actualCostUsd = isLocal ? 0 : fields.savings.optimizedCost;
+  const estimatedCostVsHaiku = estimateHaikuCost(fields.originalTokens);
+  const estimatedCostVsSonnet = estimateSonnetCost(fields.originalTokens);
+  const estimatedSavingsVsHaiku = Math.max(estimatedCostVsHaiku - actualCostUsd, 0);
+  const estimatedSavingsVsSonnet = Math.max(estimatedCostVsSonnet - actualCostUsd, 0);
+
+  // Estimate cache-eligible tokens as the stable prefix: system messages + tool definitions.
+  // This is an estimate — only confirmed upstream values are reported as confirmed_cached_tokens.
+  const stableMessages = (fields.optimized.messages || []).filter((m) => m.role === 'system');
+  const estimatedCacheEligibleTokens = countTokens(stableMessages, fields.model);
+  const tierLabel = TIER_LABELS[fields.route.selectedTier] || fields.route.selectedTier;
+  const actualRoute = `${tierLabel} — ${fields.model}`;
+
   return {
     model: fields.model,
+    actualRoute,
     originalTokens: fields.originalTokens,
     optimizedTokens: fields.optimizedTokens,
     tokensSaved: fields.savings.savedTokens,
     savedPercent: fields.savings.savedPercent,
     estimatedSavingsUsd: fields.savings.savedCost,
     actualCostUsd,
+    estimatedCostVsHaiku,
+    estimatedCostVsSonnet,
+    estimatedSavingsVsHaiku,
+    estimatedSavingsVsSonnet,
     cachedTokens: fields.cachedTokens ?? 0,
+    estimatedCacheEligibleTokens,
     clientProfile: fields.optimized.clientProfile,
     contextTokensRemoved: fields.optimized.contextTokensRemoved ?? fields.savings.savedTokens,
     latencyMs: fields.latencyMs,
@@ -265,8 +305,23 @@ const server = http.createServer(async (req, res) => {
     const model = route.model || requestData.model || 'gpt-4o-mini';
     const startedAt = Date.now();
 
+    const badgrClientHeaders = {
+      'x-badgr-client': req.headers['x-badgr-client'] || '',
+      'x-badgr-task-type': req.headers['x-badgr-task-type'] || '',
+      'x-badgr-mode': req.headers['x-badgr-mode'] || '',
+    };
+
+    const optimizationMode = resolveOptimizationMode(requestData, badgrClientHeaders, proxyConfig);
     const originalTokens = countTokens(requestData.messages || [], model);
-    const optimized = optimizeMessages(requestData.messages || [], { ...proxyConfig, model, requestData });
+    const optimized = optimizeMessages(requestData.messages || [], {
+      compressionThresholdTokens: proxyConfig.compressionThresholdTokens,
+      recentMessagesToKeep: proxyConfig.recentMessagesToKeep,
+      summaryMaxTokens: proxyConfig.summaryMaxTokens,
+      optimizationMode,
+      model,
+      requestData,
+      headers: badgrClientHeaders,
+    });
     const optimizedRequest = { ...requestData, model, messages: optimized.messages };
     const optimizedTokens = countTokens(optimizedRequest.messages || [], model);
     const savings = estimateSavings(originalTokens, optimizedTokens, model);

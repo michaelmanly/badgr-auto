@@ -60,6 +60,7 @@ function capture(event, properties) {
 export function trackRequest(entry) {
   capture('badgr_auto_request', {
     // Routing
+    actual_route:    entry.actualRoute,
     route_tier:      entry.routeTier,
     preferred_tier:  entry.preferredTier,
     fallback_used:   entry.routeFallbackUsed,
@@ -69,17 +70,22 @@ export function trackRequest(entry) {
     model:           entry.model,
 
     // Token optimization
-    original_tokens:        entry.originalTokens,
-    optimized_tokens:       entry.optimizedTokens,
-    tokens_saved:           entry.tokensSaved,
-    saved_percent:          entry.savedPercent,
-    did_dedupe:             entry.didDedupe,
-    did_compress:           entry.didCompress,
+    original_tokens:                  entry.originalTokens,
+    optimized_tokens:                 entry.optimizedTokens,
+    context_tokens_removed:           entry.contextTokensRemoved ?? 0,
+    saved_percent:                    entry.savedPercent,
+    did_dedupe:                       entry.didDedupe,
+    did_compress:                     entry.didCompress,
 
-    // Cost
-    estimated_savings_usd:  entry.estimatedSavingsUsd,
-    actual_cost_usd:        entry.actualCostUsd,
-    local_only:             entry.routeTier === 'edge',
+    // Confirmed cache (upstream-reported only — never estimated)
+    confirmed_cached_tokens:          entry.cachedTokens ?? 0,
+    estimated_cache_eligible_tokens:  entry.estimatedCacheEligibleTokens ?? 0,
+
+    // Cost — tracked separately so dashboards can compare fairly
+    actual_cloud_cost:                entry.actualCostUsd,
+    estimated_savings_vs_haiku:       entry.estimatedSavingsVsHaiku ?? 0,
+    estimated_savings_vs_sonnet:      entry.estimatedSavingsVsSonnet ?? 0,
+    local_only:                       entry.routeTier === 'edge',
 
     // Performance
     latency_ms:             entry.latencyMs,
