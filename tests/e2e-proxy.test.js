@@ -195,14 +195,15 @@ describe('routing — tier selection', () => {
 // ── Optimisation tests ────────────────────────────────────────────────────
 
 describe('context optimisation', () => {
-  it('dedupes repeated messages (tokens-saved > 0)', async () => {
-    const dup = 'Same context that appears twice in the conversation.';
+  it('dedupes repeated system instructions (tokens-saved > 0)', async () => {
+    // System messages are provably redundant when repeated — safe to dedupe regardless of length.
+    const sysInstruction = 'You are a helpful coding assistant with knowledge of JavaScript and TypeScript.';
     const res = await send({
       model: 'badgr-auto',
       messages: [
-        { role: 'user', content: dup },
-        { role: 'assistant', content: 'Noted.' },
-        { role: 'user', content: dup },
+        { role: 'system', content: sysInstruction },
+        { role: 'user', content: 'Hello' },
+        { role: 'system', content: sysInstruction }, // duplicate system — removed
         { role: 'user', content: 'What is next?' },
       ],
     });

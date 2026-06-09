@@ -30,6 +30,8 @@ function pushSavingsToBackend(entry) {
       tokens_saved: entry.tokensSaved,
       saved_percent: entry.savedPercent,
       estimated_savings_usd: entry.estimatedSavingsUsd,
+      cached_tokens: entry.cachedTokens,
+      client_profile: entry.clientProfile,
       route_tier: entry.routeTier,
       latency_ms: entry.latencyMs,
       streaming: entry.streaming,
@@ -142,37 +144,59 @@ function logSavings(entry) {
   const fallback = entry.routeFallbackUsed ? ` (fallback from ${entry.preferredTier})` : '';
   const isLocal = entry.routeTier === 'edge';
   const actualCost = entry.actualCostUsd;
-  const haikuCost = estimateHaikuCost(entry.optimizedTokens);
   const sonnetCost = estimateSonnetCost(entry.optimizedTokens);
-  const savedVsHaiku = Math.max(haikuCost - actualCost, 0);
   const savedVsSonnet = Math.max(sonnetCost - actualCost, 0);
 
-  // Token optimization section
-  const tokenDiff = entry.tokensSaved;
-  const tokenPct = entry.savedPercent.toFixed(0);
-  const tokenLine = tokenDiff > 0
-    ? `✓ Tokens: ${entry.originalTokens.toLocaleString()} → ${entry.optimizedTokens.toLocaleString()} (−${tokenDiff.toLocaleString()} tokens, ${tokenPct}%)`
-    : `✓ Tokens: ${entry.originalTokens.toLocaleString()} → ${entry.optimizedTokens.toLocaleString()}`;
+  const lines = [];
 
-  const lines = [
-    `✓ Routed: ${tierLabel}${fallback}`,
-    tokenLine,
-    isLocal ? `✓ Cloud cost: $0.00` : `✓ Actual cost: $${actualCost.toFixed(4)}`,
-    `✓ Estimated saved vs Claude Haiku:  $${savedVsHaiku.toFixed(4)}`,
-    `✓ Estimated saved vs Claude Sonnet: $${savedVsSonnet.toFixed(4)}`,
-    `✓ Latency: ${entry.latencyMs}ms${entry.streaming ? ' (stream)' : ''}`,
-  ];
+  // 1. Context optimization
+  const removed = entry.contextTokensRemoved ?? entry.tokensSaved;
+  if (removed > 0) {
+    lines.push(`✓ Context optimization: ${removed.toLocaleString()} tokens safely removed`);
+  } else {
+    lines.push(`✓ Context optimization: no changes (${entry.originalTokens.toLocaleString()} tokens)`);
+  }
+
+  // 2. Prompt caching — only report when upstream confirms it
+  if (typeof entry.cachedTokens === 'number' && entry.cachedTokens > 0) {
+    lines.push(`✓ Prompt caching: ${entry.cachedTokens.toLocaleString()} cached input tokens (upstream)`);
+  } else if (!entry.streaming) {
+    lines.push(`✓ Prompt caching: none reported by upstream`);
+  }
+
+  // 3. Routing savings
+  lines.push(
+    isLocal
+      ? `✓ Routing savings: $0.00 cloud cost (local model)`
+      : `✓ Routing savings: $${savedVsSonnet.toFixed(4)} estimated saved vs Claude Sonnet`,
+  );
+  lines.push(`✓ Actual route: ${tierLabel}${fallback}`);
+  lines.push(`✓ Latency: ${entry.latencyMs}ms${entry.streaming ? ' (stream)' : ''}`);
+
   process.stderr.write(lines.join('\n') + '\n');
 }
 
-function buildBadgrHeaders(originalTokens, optimizedTokens, savings, route) {
+function buildBadgrHeaders(originalTokens, optimizedTokens, savings, route, cachedTokens) {
   return {
     'x-badgr-original-tokens': String(originalTokens),
     'x-badgr-optimized-tokens': String(optimizedTokens),
     'x-badgr-tokens-saved': String(savings.savedTokens),
     'x-badgr-route-tier': route.selectedTier,
     'x-badgr-preferred-tier': route.preferredTier,
+    'x-badgr-cached-tokens': String(cachedTokens ?? 0),
   };
+}
+
+// Parse cached token count from the upstream provider's response usage object.
+// OpenAI: usage.prompt_tokens_details.cached_tokens
+// Anthropic-style: usage.cache_read_input_tokens
+// Returns 0 when not present (do not claim savings without confirmed metadata).
+function extractCachedTokens(responseData) {
+  const cached = responseData?.usage?.prompt_tokens_details?.cached_tokens;
+  if (typeof cached === 'number') return cached;
+  const anthropicCached = responseData?.usage?.cache_read_input_tokens;
+  if (typeof anthropicCached === 'number') return anthropicCached;
+  return 0;
 }
 
 function buildLogEntry(fields) {
@@ -186,6 +210,9 @@ function buildLogEntry(fields) {
     savedPercent: fields.savings.savedPercent,
     estimatedSavingsUsd: fields.savings.savedCost,
     actualCostUsd,
+    cachedTokens: fields.cachedTokens ?? 0,
+    clientProfile: fields.optimized.clientProfile,
+    contextTokensRemoved: fields.optimized.contextTokensRemoved ?? fields.savings.savedTokens,
     latencyMs: fields.latencyMs,
     statusCode: fields.statusCode,
     routeTier: fields.route.selectedTier,
@@ -239,11 +266,10 @@ const server = http.createServer(async (req, res) => {
     const startedAt = Date.now();
 
     const originalTokens = countTokens(requestData.messages || [], model);
-    const optimized = optimizeMessages(requestData.messages || [], { ...proxyConfig, model });
+    const optimized = optimizeMessages(requestData.messages || [], { ...proxyConfig, model, requestData });
     const optimizedRequest = { ...requestData, model, messages: optimized.messages };
     const optimizedTokens = countTokens(optimizedRequest.messages || [], model);
     const savings = estimateSavings(originalTokens, optimizedTokens, model);
-    const badgrHdrs = buildBadgrHeaders(originalTokens, optimizedTokens, savings, route);
 
     // ── Streaming path ────────────────────────────────────────────────────────
     if (requestData.stream) {
@@ -276,11 +302,13 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // Streaming: cached tokens cannot be determined without buffering. Log as 0.
+      const streamBadgrHdrs = buildBadgrHeaders(originalTokens, optimizedTokens, savings, route, 0);
       res.writeHead(upstreamResponse.status, {
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache',
         Connection: 'keep-alive',
-        ...badgrHdrs,
+        ...streamBadgrHdrs,
       });
 
       let firstChunkAt = 0;
@@ -300,7 +328,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const latencyMs = firstChunkAt ? firstChunkAt - startedAt : Date.now() - startedAt;
-      const entry = buildLogEntry({ model, originalTokens, optimizedTokens, savings, route, optimized, latencyMs, statusCode: upstreamResponse.status, streaming: true });
+      const entry = buildLogEntry({ model, originalTokens, optimizedTokens, savings, route, optimized, cachedTokens: 0, latencyMs, statusCode: upstreamResponse.status, streaming: true });
       logSavings(entry);
       await saveRequestLog(entry);
       pushSavingsToBackend(entry);
@@ -319,8 +347,9 @@ const server = http.createServer(async (req, res) => {
       upstreamData = { error: { message: err.message, type: 'proxy_error' } };
     }
 
+    const cachedTokens = extractCachedTokens(upstreamData);
     const latencyMs = Date.now() - startedAt;
-    const entry = buildLogEntry({ model, originalTokens, optimizedTokens, savings, route, optimized, latencyMs, statusCode, streaming: false });
+    const entry = buildLogEntry({ model, originalTokens, optimizedTokens, savings, route, optimized, cachedTokens, latencyMs, statusCode, streaming: false });
     logSavings(entry);
     await saveRequestLog(entry);
     pushSavingsToBackend(entry);
@@ -328,7 +357,8 @@ const server = http.createServer(async (req, res) => {
     if (statusCode >= 500) {
       trackError({ routeTier: route.selectedTier, model, statusCode, errorType: 'upstream_error', streaming: false, latencyMs });
     }
-    jsonResponse(res, statusCode, upstreamData, badgrHdrs);
+    const bufferedBadgrHdrs = buildBadgrHeaders(originalTokens, optimizedTokens, savings, route, cachedTokens);
+    jsonResponse(res, statusCode, upstreamData, bufferedBadgrHdrs);
     return;
   }
 
