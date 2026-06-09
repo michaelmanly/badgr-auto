@@ -1,0 +1,42 @@
+{
+  "name": "badgr-auto",
+  "version": "0.1.1",
+  "description": "Badgr Token Proxy — a local OpenAI-compatible proxy that deduplicates, compresses, logs, and forwards LLM chat requests.",
+  "type": "module",
+  "bin": {
+    "badgr-auto": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^8.5.2",
+    "chalk": "^5.3.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.8"
+  },
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "keywords": [
+    "ai",
+    "cline",
+    "continue",
+    "ollama",
+    "local-llm",
+    "badgr",
+    "openai",
+    "proxy"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "tiktoken": "^1.0.22"
+  },
+  "peerDependenciesMeta": {
+    "tiktoken": {
+      "optional": true
+    }
+  }
+}
