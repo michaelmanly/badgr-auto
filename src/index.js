@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import chalk from 'chalk';
 import { PROXY_PORT } from './proxy-config.js';
-import { loginCommand }  from './commands/login.js';
-import { startCommand }  from './commands/start.js';
-import { stopCommand }   from './commands/stop.js';
-import { statusCommand } from './commands/status.js';
-import { statsCommand }  from './commands/stats.js';
-import { modelsCommand } from './commands/models.js';
-import { selectCommand } from './commands/select.js';
+import { loginCommand }   from './commands/login.js';
+import { startCommand, setupCommand } from './commands/start.js';
+import { stopCommand }    from './commands/stop.js';
+import { statusCommand }  from './commands/status.js';
+import { statsCommand }   from './commands/stats.js';
+import { modelsCommand }  from './commands/models.js';
+import { selectCommand }  from './commands/select.js';
+import { restartCommand } from './commands/restart.js';
 
 const HELP = `
 ${chalk.bold('Badgr Token Proxy')} (${chalk.cyan('badgr-auto')}) — local OpenAI-compatible context optimizer
@@ -18,7 +19,9 @@ ${chalk.bold('MVP FLOW')}
 
 ${chalk.bold('SETUP')}
   ${chalk.cyan('npm install -g badgr-auto')}           Install (once)
-  ${chalk.cyan('badgr-auto start')}                   Guided setup + proxy at localhost:${PROXY_PORT}
+  ${chalk.cyan('badgr-auto start')}                   Guided setup (or status menu if running)
+  ${chalk.cyan('badgr-auto setup')}                   Re-run guided setup wizard
+  ${chalk.cyan('badgr-auto restart')}                 Restart proxy with current config
   ${chalk.cyan('badgr-auto login')}                   Connect AI Badgr (when cloud routing needed)
   ${chalk.cyan('badgr-auto stop')}                    Stop the proxy
   ${chalk.cyan('badgr-auto status')}                  Show proxy status
@@ -60,11 +63,13 @@ async function main() {
   }
 
   switch (cmd) {
-    case 'login':  return loginCommand(chalk);
-    case 'start':  return startCommand(chalk, rest);
-    case 'stop':   return stopCommand(chalk);
-    case 'status': return statusCommand(chalk);
-    case 'stats':  return statsCommand(chalk, rest);
+    case 'login':   return loginCommand(chalk);
+    case 'start':   return startCommand(chalk, rest);
+    case 'setup':   return setupCommand(chalk);
+    case 'restart': return restartCommand(chalk);
+    case 'stop':    return stopCommand(chalk);
+    case 'status':  return statusCommand(chalk);
+    case 'stats':   return statsCommand(chalk, rest);
     // Legacy local-model helpers remain for users who installed early builds.
     case 'models': return modelsCommand(chalk);
     case 'select': return selectCommand(rest[0], chalk);

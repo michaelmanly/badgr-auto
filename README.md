@@ -50,6 +50,8 @@ npm install -g badgr-auto
 badgr-auto start
 ```
 
+Use **`-g`** so `badgr-auto` is on your PATH. If you installed without `-g`, run `npx badgr-auto start` instead.
+
 Or from source: [github.com/michaelmanly/badgr-auto](https://github.com/michaelmanly/badgr-auto)
 
 ### What `badgr-auto start` does (first run)
@@ -311,7 +313,19 @@ When logged in, savings are also sent to your AI Badgr account in the background
 badgr-auto start
 ```
 
-Start the proxy. First run launches **guided setup** (routing mode, local models, optional Badgr key).
+Start the proxy. First run launches **guided setup** (routing mode, local models, optional Badgr key). If already running, shows a menu (instructions, re-run setup, restart, stop).
+
+```bash
+badgr-auto setup
+```
+
+Re-run the guided setup wizard.
+
+```bash
+badgr-auto restart
+```
+
+Restart the proxy with your current config.
 
 ```bash
 badgr-auto login

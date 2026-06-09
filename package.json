@@ -1,6 +1,6 @@
 {
   "name": "badgr-auto",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Badgr Auto — local OpenAI-compatible proxy that optimizes context, routes to cheapest model, and logs savings. Works with Cline, Continue, Aider, and any OpenAI-compatible tool.",
   "type": "module",
   "bin": {

@@ -10,6 +10,7 @@ import { loadConfig, saveConfig, DEFAULTS } from '../config.js';
 import { detectLocalServers } from '../detect.js';
 import { detectHardware } from '../hardware.js';
 import { probeProxy } from '../probe-proxy.js';
+import { stopCommand } from './stop.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -18,6 +19,8 @@ const PROXY_URL    = `http://localhost:${PROXY_PORT}/v1`;
 
 function parseArgs(args) {
   const updates = {};
+  let forceWizard = false;
+  let forceRestart = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--upstream' && args[i + 1]) {
       updates.upstreamBaseUrl = args[++i].replace(/\/+$/, '');
@@ -25,8 +28,10 @@ function parseArgs(args) {
     }
     if (args[i] === '--threshold' && args[i + 1]) updates.compressionThresholdTokens = Number.parseInt(args[++i], 10);
     if (args[i] === '--recent' && args[i + 1]) updates.recentMessagesToKeep = Number.parseInt(args[++i], 10);
+    if (args[i] === '--setup') forceWizard = true;
+    if (args[i] === '--force') forceRestart = true;
   }
-  return updates;
+  return { ...updates, forceWizard, forceRestart };
 }
 
 function launchProxyProcess() {
@@ -49,33 +54,47 @@ async function waitForProxy(port, ms = 6000) {
   return false;
 }
 
-export async function startCommand(chalk, args = []) {
-  const cliUpdates = parseArgs(args);
+export const ROUTING_DEFAULT = 'hybrid';
 
-  // ── Already running ────────────────────────────────────────────────────
-  if (isProxyRunning()) {
-    const pid = readProxyPid();
-    console.log(chalk.green(`\n  ✓ Badgr Auto already running (PID ${pid}) at ${PROXY_URL}\n`));
-    return;
+export const ROUTING_CHOICES = [
+  {
+    name: 'Local only\n    Use Ollama or LM Studio on this computer — no AI Badgr account required',
+    value: 'local',
+    short: 'Local only',
+  },
+  {
+    name: 'Local + cloud  (Recommended)\n    Use local models for easy tasks. Escalate harder work to AI Badgr OSS models or premium models when needed',
+    value: 'hybrid',
+    short: 'Local + cloud',
+  },
+];
+
+export const LOCAL_SERVER_URLS = {
+  ollama: 'http://localhost:11434',
+  lmstudio: 'http://localhost:1234',
+};
+
+export const ONBOARDING_PROMPTS = {
+  local: 'Explain what this JavaScript function does.',
+  cloud: 'Review this backend architecture for security risks.',
+};
+
+async function _runFastStart(chalk, config, cliUpdates) {
+  if (cliUpdates.upstreamBaseUrl) {
+    saveProxyConfig(cliUpdates);
+  } else if (config.apiKey && config.baseUrl) {
+    const upstream = config.baseUrl.replace(/\/+$/, '');
+    saveProxyConfig({ upstreamBaseUrl: upstream, midBaseUrl: upstream, ...cliUpdates });
   }
+  const pid = launchProxyProcess();
+  writeProxyPid(pid);
+  console.log();
+  console.log(chalk.green('  ✓ Badgr Auto running at ' + PROXY_URL));
+  _printConnectionBlock(chalk, config);
+}
 
+async function _runWizard(chalk, cliUpdates) {
   const config = loadConfig();
-
-  // ── Non-interactive fast path (CI / scripted) ──────────────────────────
-  if (cliUpdates.upstreamBaseUrl || config.apiKey) {
-    if (cliUpdates.upstreamBaseUrl) {
-      saveProxyConfig(cliUpdates);
-    } else if (config.apiKey && config.baseUrl) {
-      const upstream = config.baseUrl.replace(/\/+$/, '');
-      saveProxyConfig({ upstreamBaseUrl: upstream, midBaseUrl: upstream, ...cliUpdates });
-    }
-    const pid = launchProxyProcess();
-    writeProxyPid(pid);
-    console.log();
-    console.log(chalk.green('  ✓ Badgr Auto running at ' + PROXY_URL));
-    _printConnectionBlock(chalk, config);
-    return;
-  }
 
   // ── Guided onboarding ──────────────────────────────────────────────────
   console.log();
@@ -85,26 +104,20 @@ export async function startCommand(chalk, args = []) {
   // Step 1 — routing mode
   const mode = await select({
     message: 'How do you want to run AI requests?',
-    choices: [
-      {
-        name: 'Local + cloud  (Recommended)\n    Use local models for easy tasks, AI Badgr cloud for harder work',
-        value: 'hybrid',
-        short: 'Local + cloud',
-      },
-      {
-        name: 'Local only\n    Use Ollama or LM Studio on this computer — no AI Badgr account needed',
-        value: 'local',
-        short: 'Local only',
-      },
-    ],
+    choices: ROUTING_CHOICES,
+    default: ROUTING_DEFAULT,
   });
 
   console.log();
 
   // Step 2 — detect local models + hardware
-  process.stdout.write('  Detecting local model servers…');
+  console.log('  Checking local model servers…');
+  console.log();
+  console.log(`    Ollama     → ${LOCAL_SERVER_URLS.ollama}`);
+  console.log(`    LM Studio  → ${LOCAL_SERVER_URLS.lmstudio}`);
+  console.log();
   const [servers, hw] = await Promise.all([detectLocalServers(), (async () => { try { return detectHardware(); } catch { return { vramGb: 0, ramGb: 0, cpuCores: 0, recommended: null }; } })()]);
-  process.stdout.write('\r' + ' '.repeat(40) + '\r'); // clear line
+
 
   const ramLabel   = `${hw.ramGb.toFixed(1)} GB RAM`;
   const vramLabel  = hw.vramGb > 0 ? `${hw.vramGb.toFixed(1)} GB VRAM` : 'no discrete GPU detected';
@@ -205,7 +218,10 @@ export async function startCommand(chalk, args = []) {
   if (localBaseUrl) {
     console.log('  Testing local route…');
     console.log();
-    const localPrompt = 'Explain what this JavaScript function does: function add(a,b){return a+b;}';
+    const localPrompt = `${ONBOARDING_PROMPTS.local} function add(a,b){return a+b;}`;
+    console.log('    Prompt:');
+    console.log(`    ${ONBOARDING_PROMPTS.local}`);
+    console.log();
     const localResult = await probeProxy(PROXY_PORT, localPrompt);
     if (localResult.ok) {
       const saved = localResult.tokensBefore - localResult.tokensAfter;
@@ -228,15 +244,16 @@ export async function startCommand(chalk, args = []) {
   if (mode === 'hybrid') {
     console.log('  Testing cloud escalation…');
     console.log();
-    console.log('    Prompt: Review this backend architecture for security risks.');
+    console.log('    Prompt:');
+    console.log(`    ${ONBOARDING_PROMPTS.cloud}`);
     console.log();
     console.log('    This task needs a stronger cloud route.');
     console.log();
 
     if (!config.apiKey) {
-      console.log('  Connect your AI Badgr account to unlock cloud routing:');
+      console.log('  Connect your AI Badgr account to continue.');
       console.log();
-      console.log(`    ${chalk.cyan('https://aibadgr.com/login')}`);
+      console.log(`  ${chalk.cyan('https://aibadgr.com/login')}`);
       console.log();
 
       let apiKey = '';
@@ -254,13 +271,11 @@ export async function startCommand(chalk, args = []) {
         const upstream = saved.baseUrl.replace(/\/+$/, '');
         saveProxyConfig({ upstreamBaseUrl: upstream, midBaseUrl: upstream });
 
-        let validated = false;
         try {
           const res = await fetch(`${saved.baseUrl}/models`, {
             headers: { Authorization: `Bearer ${saved.apiKey}` },
             signal: AbortSignal.timeout(8000),
           });
-          validated = res.ok || res.status === 404;
         } catch { /* offline — save anyway */ }
 
         console.log();
@@ -275,7 +290,7 @@ export async function startCommand(chalk, args = []) {
         console.log();
         const cloudResult = await probeProxy(
           PROXY_PORT,
-          'Review this backend architecture for security risks. List the top 3 concerns.',
+          `${ONBOARDING_PROMPTS.cloud} List the top 3 concerns.`,
           { apiKey: saved.apiKey },
         );
         if (cloudResult.ok) {
@@ -298,6 +313,83 @@ export async function startCommand(chalk, args = []) {
   console.log(chalk.green('  ✓ AI Badgr Auto is ready'));
   console.log();
   _printConnectionBlock(chalk, loadConfig());
+}
+
+async function _restartProxy(chalk, cliUpdates) {
+  stopCommand(chalk);
+  await new Promise(r => setTimeout(r, 400));
+  const config = loadConfig();
+  await _runFastStart(chalk, config, cliUpdates);
+}
+
+export async function startCommand(chalk, args = []) {
+  const { forceWizard, forceRestart, ...cliUpdates } = parseArgs(args);
+
+  // ── Already running ────────────────────────────────────────────────────
+  if (isProxyRunning()) {
+    if (forceRestart) {
+      return _restartProxy(chalk, cliUpdates);
+    }
+
+    if (forceWizard) {
+      stopCommand(chalk);
+      return _runWizard(chalk, cliUpdates);
+    }
+
+    // Status-aware menu
+    console.log(chalk.green(`\n  ✓ Badgr Auto is already running at ${PROXY_URL}\n`));
+    console.log('  What do you want to do?');
+
+    let choice;
+    try {
+      choice = await select({
+        message: 'Choose an action:',
+        choices: [
+          { name: 'Show connection instructions', value: 'instructions' },
+          { name: 'Re-run setup wizard',           value: 'wizard' },
+          { name: 'Restart proxy',                 value: 'restart' },
+          { name: 'Stop proxy',                    value: 'stop' },
+        ],
+      });
+    } catch {
+      // user hit ctrl-c
+      return;
+    }
+
+    if (choice === 'instructions') {
+      _printConnectionBlock(chalk, loadConfig());
+    } else if (choice === 'wizard') {
+      stopCommand(chalk);
+      return _runWizard(chalk, cliUpdates);
+    } else if (choice === 'restart') {
+      return _restartProxy(chalk, cliUpdates);
+    } else if (choice === 'stop') {
+      stopCommand(chalk);
+    }
+    return;
+  }
+
+  const config = loadConfig();
+
+  // ── Force wizard ───────────────────────────────────────────────────────
+  if (forceWizard) {
+    return _runWizard(chalk, cliUpdates);
+  }
+
+  // ── Non-interactive fast path (CI / scripted) ──────────────────────────
+  if (cliUpdates.upstreamBaseUrl || config.apiKey) {
+    return _runFastStart(chalk, config, cliUpdates);
+  }
+
+  // ── Guided onboarding (first-time user) ───────────────────────────────
+  return _runWizard(chalk, cliUpdates);
+}
+
+export async function setupCommand(chalk) {
+  if (isProxyRunning()) {
+    stopCommand(chalk);
+  }
+  return _runWizard(chalk, {});
 }
 
 function _printConnectionBlock(chalk, config) {
