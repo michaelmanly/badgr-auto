@@ -105,6 +105,18 @@ describe('classifyRequest', () => {
     expect(classifyRequest({})).toBe('simple');
     expect(classifyRequest({ messages: [] })).toBe('simple');
   });
+
+  it('uses 500-token threshold — message at 501 tokens routes to normal not simple', () => {
+    const text = 'a'.repeat(501 * 4);
+    const req = { messages: [{ role: 'user', content: text }] };
+    expect(classifyRequest(req)).toBe('normal');
+  });
+
+  it('message at exactly 500 tokens routes to simple (Local)', () => {
+    const text = 'a'.repeat(500 * 4);
+    const req = { messages: [{ role: 'user', content: text }] };
+    expect(classifyRequest(req)).toBe('simple');
+  });
 });
 
 // ---------------------------------------------------------------------------

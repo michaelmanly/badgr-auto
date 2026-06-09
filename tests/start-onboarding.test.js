@@ -34,14 +34,41 @@ describe('hardware detection', () => {
     expect(vram).toBeGreaterThanOrEqual(0);
   });
 
-  it('detectHardware returns all fields', async () => {
+  it('detectHardware returns all fields including systemLoad', async () => {
     const { detectHardware } = await import('../src/hardware.js');
     const hw = detectHardware();
     expect(typeof hw.vramGb).toBe('number');
     expect(typeof hw.ramGb).toBe('number');
     expect(typeof hw.cpuCores).toBe('number');
-    // recommended may be null on very constrained machines, but field must exist
     expect('recommended' in hw).toBe(true);
+    expect(typeof hw.systemLoad).toBe('object');
+    expect(typeof hw.systemLoad.isHighLoad).toBe('boolean');
+    expect(typeof hw.systemLoad.ramUsedPct).toBe('number');
+    expect(typeof hw.systemLoad.vramUsedPct).toBe('number');
+  });
+});
+
+// ── System load detection ─────────────────────────────────────────────────
+
+describe('detectSystemLoad', () => {
+  it('returns isHighLoad as boolean', async () => {
+    const { detectSystemLoad } = await import('../src/hardware.js');
+    const load = detectSystemLoad();
+    expect(typeof load.isHighLoad).toBe('boolean');
+  });
+
+  it('ramUsedPct is between 0 and 100', async () => {
+    const { detectSystemLoad } = await import('../src/hardware.js');
+    const load = detectSystemLoad();
+    expect(load.ramUsedPct).toBeGreaterThanOrEqual(0);
+    expect(load.ramUsedPct).toBeLessThanOrEqual(100);
+  });
+
+  it('vramUsedPct is between 0 and 100', async () => {
+    const { detectSystemLoad } = await import('../src/hardware.js');
+    const load = detectSystemLoad();
+    expect(load.vramUsedPct).toBeGreaterThanOrEqual(0);
+    expect(load.vramUsedPct).toBeLessThanOrEqual(100);
   });
 });
 
@@ -53,31 +80,105 @@ describe('recommendModel', () => {
     expect(recommendModel(0, 0)).toBeNull();
   });
 
-  it('recommends phi3:mini for 2 GB vram and 5 GB ram', async () => {
+  it('returns null for 2 GB vram / 5 GB ram — below minimum threshold', async () => {
     const { recommendModel } = await import('../src/hardware.js');
-    const m = recommendModel(2, 5);
-    expect(m).not.toBeNull();
-    expect(m.name).toBe('phi3:mini');
+    expect(recommendModel(2, 5)).toBeNull();
   });
 
-  it('recommends qwen2.5-coder:7b for 6 GB vram', async () => {
+  it('returns null for 6 GB vram — conservative: below 8 GB minimum for 7B', async () => {
     const { recommendModel } = await import('../src/hardware.js');
-    const m = recommendModel(6, 8);
-    expect(m?.name).toBe('qwen2.5-coder:7b');
+    expect(recommendModel(6, 8)).toBeNull();
+  });
+
+  it('recommends qwen2.5-coder:7b for exactly 8 GB vram', async () => {
+    const { recommendModel } = await import('../src/hardware.js');
+    expect(recommendModel(8, 16)?.name).toBe('qwen2.5-coder:7b');
+  });
+
+  it('recommends qwen2.5-coder:7b for 11 GB vram (top of 8–11 range)', async () => {
+    const { recommendModel } = await import('../src/hardware.js');
+    expect(recommendModel(11, 20)?.name).toBe('qwen2.5-coder:7b');
+  });
+
+  it('recommends qwen2.5-coder:14b for 12 GB vram', async () => {
+    const { recommendModel } = await import('../src/hardware.js');
+    expect(recommendModel(12, 24)?.name).toBe('qwen2.5-coder:14b');
   });
 
   it('recommends qwen2.5-coder:14b for 16 GB vram', async () => {
     const { recommendModel } = await import('../src/hardware.js');
-    const m = recommendModel(16, 32);
-    expect(m?.name).toBe('qwen2.5-coder:14b');
+    expect(recommendModel(16, 32)?.name).toBe('qwen2.5-coder:14b');
   });
 
-  it('falls back to RAM when vram is 0 but ram is large', async () => {
+  it('recommends qwen2.5-coder:32b for 24 GB vram', async () => {
+    const { recommendModel } = await import('../src/hardware.js');
+    expect(recommendModel(24, 48)?.name).toBe('qwen2.5-coder:32b');
+  });
+
+  it('falls back to RAM for CPU inference when vram is 0 but ram >= 16 GB', async () => {
     const { recommendModel } = await import('../src/hardware.js');
     const m = recommendModel(0, 16);
     expect(m).not.toBeNull();
-    // 16 GB RAM meets the 12 GB RAM requirement for the 7B model
-    expect(['qwen2.5-coder:7b', 'qwen2.5-coder:14b']).toContain(m.name);
+    expect(m.name).toBe('qwen2.5-coder:7b');
+  });
+
+  it('returns null when vram is 0 and ram is below 16 GB', async () => {
+    const { recommendModel } = await import('../src/hardware.js');
+    expect(recommendModel(0, 12)).toBeNull();
+  });
+});
+
+// ── selectBestLocalModel ─────────────────────────────────────────────────
+
+describe('selectBestLocalModel', () => {
+  it('returns null when no models are installed', async () => {
+    const { selectBestLocalModel } = await import('../src/hardware.js');
+    expect(selectBestLocalModel([], 8, 16)).toBeNull();
+  });
+
+  it('returns null when hardware is too constrained', async () => {
+    const { selectBestLocalModel } = await import('../src/hardware.js');
+    expect(selectBestLocalModel(['phi3:mini'], 2, 4)).toBeNull();
+  });
+
+  it('prefers coding models over general models of the same size', async () => {
+    const { selectBestLocalModel } = await import('../src/hardware.js');
+    const models = ['llama3.1:8b', 'qwen2.5-coder:7b', 'mistral:7b'];
+    expect(selectBestLocalModel(models, 8, 16)).toBe('qwen2.5-coder:7b');
+  });
+
+  it('selects the largest coding model that fits within the hardware tier', async () => {
+    const { selectBestLocalModel } = await import('../src/hardware.js');
+    const models = ['qwen2.5-coder:7b', 'qwen2.5-coder:14b', 'qwen2.5-coder:32b'];
+    // 12 GB VRAM → 14B tier → picks 14B
+    expect(selectBestLocalModel(models, 12, 24)).toBe('qwen2.5-coder:14b');
+  });
+
+  it('does not pick a model larger than the hardware tier allows', async () => {
+    const { selectBestLocalModel } = await import('../src/hardware.js');
+    const models = ['qwen2.5-coder:7b', 'qwen2.5-coder:14b'];
+    // 8 GB VRAM → 7B tier → must not pick 14B
+    expect(selectBestLocalModel(models, 8, 16)).toBe('qwen2.5-coder:7b');
+  });
+
+  it('returns null when no installed model fits the tier (all models too large)', async () => {
+    const { selectBestLocalModel } = await import('../src/hardware.js');
+    const models = ['qwen2.5-coder:32b'];
+    // Only 8 GB VRAM → 7B tier → 32B model won't fit
+    expect(selectBestLocalModel(models, 8, 16)).toBeNull();
+  });
+
+  it('picks deepseek-coder as a coding model over a general-purpose llama', async () => {
+    const { selectBestLocalModel } = await import('../src/hardware.js');
+    const models = ['llama3.1:8b', 'deepseek-coder:7b'];
+    expect(selectBestLocalModel(models, 8, 16)).toBe('deepseek-coder:7b');
+  });
+
+  it('with 24 GB VRAM selects the best coding model from a large installed list', async () => {
+    const { selectBestLocalModel } = await import('../src/hardware.js');
+    const models = ['qwen2.5-coder:7b', 'llama3.1:70b', 'qwen2.5-coder:32b', 'phi3:mini'];
+    // 24 GB → 32B tier; 70B is filtered out (too large); picks 32B coding model
+    expect(selectBestLocalModel(models, 24, 48)).toBe('qwen2.5-coder:32b');
   });
 });
 

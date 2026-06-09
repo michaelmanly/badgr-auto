@@ -30,7 +30,7 @@ export function estimatePromptTokens(messages) {
  */
 export function classifyRequest(requestData, config = {}) {
   const mode            = config.mode            || 'balanced';
-  const simpleMaxTokens = config.simpleMaxTokens ?? 512;
+  const simpleMaxTokens = config.simpleMaxTokens ?? 500;
   const hardMinTokens   = config.hardMinTokens   ?? 4096;
   const messages = requestData.messages || [];
 

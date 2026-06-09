@@ -4,12 +4,13 @@ import { dirname, join } from 'path';
 import { select, input } from '@inquirer/prompts';
 import {
   loadProxyConfig, saveProxyConfig,
-  readProxyPid, writeProxyPid, isProxyRunning, PROXY_PORT,
+  readProxyPid, writeProxyPid, clearProxyPid, isProxyRunning, PROXY_PORT,
 } from '../proxy-config.js';
 import { loadConfig, saveConfig, DEFAULTS } from '../config.js';
 import { detectLocalServers } from '../detect.js';
-import { detectHardware } from '../hardware.js';
+import { detectHardware, selectBestLocalModel } from '../hardware.js';
 import { probeProxy } from '../probe-proxy.js';
+import { waitForProxy } from '../wait-for-proxy.js';
 import { stopCommand } from './stop.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -40,18 +41,18 @@ function launchProxyProcess() {
   return child.pid;
 }
 
-/** Wait up to `ms` for the proxy to start accepting connections. */
-async function waitForProxy(port, ms = 6000) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    try {
-      await fetch(`http://localhost:${port}/v1/models`, { signal: AbortSignal.timeout(500) });
-      return true;
-    } catch {
-      await new Promise(r => setTimeout(r, 300));
-    }
+function _cleanupFailedProxyStart() {
+  const pid = readProxyPid();
+  if (pid) {
+    try { process.kill(pid, 'SIGTERM'); } catch { /* already exited */ }
   }
-  return false;
+  clearProxyPid();
+}
+
+function _printProxyStartFailure(chalk) {
+  console.log(chalk.yellow('  Proxy did not start in time.'));
+  console.log(`  Try ${chalk.cyan('badgr-auto stop')} then ${chalk.cyan('badgr-auto start')} again.`);
+  console.log();
 }
 
 export const ROUTING_DEFAULT = 'hybrid';
@@ -63,7 +64,7 @@ export const ROUTING_CHOICES = [
     short: 'Local only',
   },
   {
-    name: 'Local + cloud  (Recommended)\n    Use local models for easy tasks. Escalate harder work to AI Badgr OSS models or premium models when needed',
+    name: 'Local + cloud  (Recommended)\n    Local for tiny tasks → DeepSeek for normal work → Claude Sonnet only when needed. Escalate harder work to OSS or premium models when needed',
     value: 'hybrid',
     short: 'Local + cloud',
   },
@@ -116,19 +117,26 @@ async function _runWizard(chalk, cliUpdates) {
   console.log(`    Ollama     → ${LOCAL_SERVER_URLS.ollama}`);
   console.log(`    LM Studio  → ${LOCAL_SERVER_URLS.lmstudio}`);
   console.log();
-  const [servers, hw] = await Promise.all([detectLocalServers(), (async () => { try { return detectHardware(); } catch { return { vramGb: 0, ramGb: 0, cpuCores: 0, recommended: null }; } })()]);
+  const noLoadFallback = { vramGb: 0, ramGb: 0, cpuCores: 0, recommended: null, systemLoad: { vramUsedPct: 0, ramUsedPct: 0, isHighLoad: false } };
+  const [servers, hw] = await Promise.all([
+    detectLocalServers(),
+    (async () => { try { return detectHardware(); } catch { return noLoadFallback; } })(),
+  ]);
 
-
-  const ramLabel   = `${hw.ramGb.toFixed(1)} GB RAM`;
-  const vramLabel  = hw.vramGb > 0 ? `${hw.vramGb.toFixed(1)} GB VRAM` : 'no discrete GPU detected';
-  const cpuLabel   = `${hw.cpuCores} CPU cores`;
+  const ramLabel  = `${hw.ramGb.toFixed(1)} GB RAM`;
+  const vramLabel = hw.vramGb > 0 ? `${hw.vramGb.toFixed(1)} GB VRAM` : 'no discrete GPU detected';
+  const cpuLabel  = `${hw.cpuCores} CPU cores`;
   console.log(`  Hardware: ${ramLabel}, ${vramLabel}, ${cpuLabel}`);
   console.log();
 
   let localBaseUrl = '';
   let localModel   = '';
 
-  if (servers.length > 0) {
+  // If the machine is already under heavy load, skip local entirely.
+  if (hw.systemLoad.isHighLoad) {
+    console.log(chalk.yellow(`  System load is high (GPU: ${hw.systemLoad.vramUsedPct}%, RAM: ${hw.systemLoad.ramUsedPct}%) — skipping local, routing all requests to cloud.`));
+    console.log();
+  } else if (servers.length > 0) {
     for (const s of servers) {
       console.log(chalk.green(`  ✓ ${s.name} detected at ${s.url}`));
       if (s.models.length) {
@@ -137,23 +145,21 @@ async function _runWizard(chalk, cliUpdates) {
     }
     console.log();
 
-    // Pick the best available model from the first server found
     const primary = servers[0];
-    localBaseUrl = `${primary.url}/v1`;
+    localBaseUrl  = `${primary.url}/v1`;
 
     if (primary.models.length) {
-      const preferredOrder = hw.recommended?.name ? [hw.recommended.name, 'qwen2.5-coder:7b', 'llama3.2:8b', 'llama3.1:8b', 'mistral:7b'] : ['qwen2.5-coder:7b', 'llama3.2:8b'];
-      const defaultModel = preferredOrder.find(m => primary.models.some(pm => pm === m || pm.startsWith(m.split(':')[0]))) || primary.models[0];
-      if (primary.models.length > 1) {
-        localModel = await select({
-          message: '  Select a local model for simple tasks:',
-          choices: primary.models.map(m => ({ name: m, value: m })),
-          default: defaultModel,
-        });
+      const autoModel = selectBestLocalModel(primary.models, hw.vramGb, hw.ramGb);
+      if (autoModel) {
+        localModel = autoModel;
+        console.log(`  Auto-selected local model: ${chalk.cyan(localModel)}`);
+        if (hw.recommended) {
+          console.log(`  Hardware tier: ${chalk.dim(hw.recommended.label)}`);
+        }
       } else {
-        localModel = primary.models[0];
+        console.log(chalk.yellow('  No installed model fits your hardware tier — routing to cloud.'));
+        localBaseUrl = '';
       }
-      console.log(`  Using local model: ${chalk.cyan(localModel)}`);
       console.log();
     }
   } else {
@@ -211,7 +217,8 @@ async function _runWizard(chalk, cliUpdates) {
   process.stdout.write('\r' + ' '.repeat(30) + '\r');
 
   if (!ready) {
-    console.log(chalk.yellow('  Proxy did not start in time. Try running badgr-auto start again.'));
+    _cleanupFailedProxyStart();
+    _printProxyStartFailure(chalk);
     return;
   }
 

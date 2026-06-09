@@ -13,7 +13,7 @@ const ASYNC_TASKS = new Set(['embedding', 'embeddings', 'indexing', 'index', 'ba
 const PREMIUM_TASKS = new Set(['deep_debugging', 'deep-debugging', 'deep debugging', 'reasoning', 'final_output', 'final-output', 'final response', 'critical']);
 
 export const DEFAULT_ROUTING_OPTIONS = {
-  edgeMaxTokens: 768,
+  edgeMaxTokens: 500,
   premiumMinTokens: 4096,
   edgeLatencyMs: 250,
   midLatencyMs: 2000,
@@ -97,7 +97,7 @@ export function routeRequest(requestData = {}, config = {}) {
   const selectedTier = firstAvailableTier(preferred.tier, routingConfig);
   const endpoint = tierEndpoint(routingConfig, selectedTier);
   const requestedModel = requestData.model && requestData.model !== 'badgr-auto' ? requestData.model : '';
-  const model = requestedModel || endpoint.model || routingConfig.defaultModel || 'gpt-4o-mini';
+  const model = requestedModel || endpoint.model || routingConfig.defaultModel || 'deepseek-chat';
   const latencyTargetMs = routingConfig[`${selectedTier}LatencyMs`];
   const fallbackUsed = selectedTier !== preferred.tier;
 

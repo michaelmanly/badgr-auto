@@ -1,30 +1,17 @@
 import { stopCommand } from './stop.js';
 import { loadConfig } from '../config.js';
 import {
-  isProxyRunning, saveProxyConfig, writeProxyPid,
-  PROXY_PORT, readProxyPid,
+  saveProxyConfig, writeProxyPid, clearProxyPid, readProxyPid, PROXY_PORT,
 } from '../proxy-config.js';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { waitForProxy } from '../wait-for-proxy.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const PROXY_SCRIPT = join(__dirname, '..', 'proxy-server.js');
 const PROXY_URL    = `http://localhost:${PROXY_PORT}/v1`;
-
-async function waitForProxy(port, ms = 6000) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    try {
-      await fetch(`http://localhost:${port}/v1/models`, { signal: AbortSignal.timeout(500) });
-      return true;
-    } catch {
-      await new Promise(r => setTimeout(r, 300));
-    }
-  }
-  return false;
-}
 
 export async function restartCommand(chalk) {
   stopCommand(chalk);
@@ -47,6 +34,11 @@ export async function restartCommand(chalk) {
   if (ready) {
     console.log(chalk.green(`\n  ✓ Badgr Auto restarted at ${PROXY_URL}\n`));
   } else {
-    console.log(chalk.yellow('\n  Proxy did not start in time. Try badgr-auto start again.\n'));
+    const pid = readProxyPid();
+    if (pid) {
+      try { process.kill(pid, 'SIGTERM'); } catch { /* ignore */ }
+    }
+    clearProxyPid();
+    console.log(chalk.yellow('\n  Proxy did not start in time. Try badgr-auto stop, then badgr-auto start again.\n'));
   }
 }
