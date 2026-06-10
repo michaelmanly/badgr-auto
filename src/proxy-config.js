@@ -24,7 +24,9 @@ export const CONFIG_DEFAULTS = {
   recentMessagesToKeep: 8,
   summaryMaxTokens: 1600,
   setupComplete: false,
-  routingMode: 'hybrid',
+  routingMode: 'direct',
+  tokenOptimization: true,
+  savingsStats: true,
 };
 
 const ENV_URL_KEYS = {

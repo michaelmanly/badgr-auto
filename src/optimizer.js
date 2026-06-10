@@ -177,8 +177,8 @@ export function optimizeMessages(messages, options = {}) {
     return { messages: [], didDedupe: false, didCompress: false, contextTokensRemoved: 0, clientProfile: profile, removedBlocks: [] };
   }
 
-  // optimizationMode: 'off' — skip dedupe/compress/rewrite only; routing is handled separately.
-  if (options.optimizationMode === 'off') {
+  // Off mode: pass through entirely unchanged. No deduplication, no compaction.
+  if (options.mode === 'off') {
     return { messages, didDedupe: false, didCompress: false, contextTokensRemoved: 0, clientProfile: profile, removedBlocks: [] };
   }
 

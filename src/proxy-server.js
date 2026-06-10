@@ -17,6 +17,8 @@ import { routeRequest } from './router.js';
 import { trackRequest, trackError } from './analytics.js';
 
 function pushSavingsToBackend(entry) {
+  const proxyConfig = loadProxyConfig();
+  if (!proxyConfig.savingsStats) return;
   const config = loadConfig();
   if (!config.apiKey || !config.baseUrl) return;
   const backendBase = config.baseUrl.replace(/\/v1\/?$/, '');
@@ -71,9 +73,8 @@ function normalizeOptimizationMode(value) {
 }
 
 /**
- * Resolve per-request token optimization mode.
- * Does NOT affect routing — routeRequest() runs independently and always selects
- * local / OSS cloud / premium tiers as usual.
+ * Per-request token optimization mode. Does NOT affect routing.
+ * Priority: X-Badgr-Mode header → body fields → proxyConfig.tokenOptimization.
  */
 export function resolveOptimizationMode(requestData = {}, headers = {}, proxyConfig = {}) {
   const headerMode = normalizeOptimizationMode(headers['x-badgr-mode']);
@@ -87,7 +88,21 @@ export function resolveOptimizationMode(requestData = {}, headers = {}, proxyCon
   );
   if (bodyMode) return bodyMode;
 
-  return normalizeOptimizationMode(proxyConfig.optimizationMode);
+  if (proxyConfig.tokenOptimization === false) return 'off';
+  return undefined;
+}
+
+function buildOptimizerOptions(proxyConfig, requestData, headers, model) {
+  const optimizationMode = resolveOptimizationMode(requestData, headers, proxyConfig);
+  return {
+    compressionThresholdTokens: proxyConfig.compressionThresholdTokens,
+    recentMessagesToKeep: proxyConfig.recentMessagesToKeep,
+    summaryMaxTokens: proxyConfig.summaryMaxTokens,
+    ...(optimizationMode === 'off' ? { mode: 'off' } : {}),
+    model,
+    requestData,
+    headers,
+  };
 }
 
 function isDirectOpenAiUpstream(baseUrl) {
@@ -238,6 +253,7 @@ function buildLogEntry(fields) {
 
   return {
     model: fields.model,
+    client: fields.clientHeaders?.['x-badgr-client'] || null,
     actualRoute,
     originalTokens: fields.originalTokens,
     optimizedTokens: fields.optimizedTokens,
@@ -263,7 +279,23 @@ function buildLogEntry(fields) {
     didDedupe: fields.optimized.didDedupe,
     didCompress: fields.optimized.didCompress,
     streaming: fields.streaming,
+    providerRequestId: fields.providerRequestId ?? null,
+    startedAt: fields.startedAtIso ?? null,
+    endedAt: fields.endedAtIso ?? null,
+    streamCompleted: fields.streamCompleted ?? false,
+    clientDisconnected: fields.clientDisconnected ?? false,
+    timedOut: fields.timedOut ?? false,
+    outputTokensReceived: fields.outputTokensReceived ?? 0,
+    providerUsageReported: fields.providerUsageReported ?? false,
+    chargeStatus: fields.chargeStatus ?? null,
   };
+}
+
+function computeChargeStatus({ statusCode, clientDisconnected, timedOut, providerUsageReported }) {
+  if ((statusCode || 200) >= 400) return 'not_charged';
+  if (providerUsageReported) return 'confirmed_usage_reported';
+  if (clientDisconnected || timedOut) return 'potentially_charged';
+  return 'unknown';
 }
 
 const server = http.createServer(async (req, res) => {
@@ -301,7 +333,25 @@ const server = http.createServer(async (req, res) => {
     }
 
     const proxyConfig = loadProxyConfig();
-    const route = routeRequest(requestData, proxyConfig);
+
+    // ── Routing ───────────────────────────────────────────────────────────────
+    let route;
+    if (proxyConfig.routingMode === 'direct') {
+      const directModel = (requestData.model && requestData.model !== 'badgr-auto')
+        ? requestData.model
+        : (proxyConfig.defaultModel || 'deepseek-chat');
+      route = {
+        preferredTier: 'mid', selectedTier: 'mid',
+        model: directModel,
+        baseUrl: proxyConfig.upstreamBaseUrl || proxyConfig.midBaseUrl,
+        reason: 'routing disabled — direct passthrough',
+        taskType: null, classification: null, promptTokens: 0,
+        latencyTargetMs: null, fallbackUsed: false,
+      };
+    } else {
+      route = routeRequest(requestData, proxyConfig);
+    }
+
     const model = route.model || requestData.model || 'gpt-4o-mini';
     const startedAt = Date.now();
 
@@ -311,17 +361,12 @@ const server = http.createServer(async (req, res) => {
       'x-badgr-mode': req.headers['x-badgr-mode'] || '',
     };
 
-    const optimizationMode = resolveOptimizationMode(requestData, badgrClientHeaders, proxyConfig);
+    // ── Token optimization (routing above is unaffected) ─────────────────────
     const originalTokens = countTokens(requestData.messages || [], model);
-    const optimized = optimizeMessages(requestData.messages || [], {
-      compressionThresholdTokens: proxyConfig.compressionThresholdTokens,
-      recentMessagesToKeep: proxyConfig.recentMessagesToKeep,
-      summaryMaxTokens: proxyConfig.summaryMaxTokens,
-      optimizationMode,
-      model,
-      requestData,
-      headers: badgrClientHeaders,
-    });
+    const optimized = optimizeMessages(
+      requestData.messages || [],
+      buildOptimizerOptions(proxyConfig, requestData, badgrClientHeaders, model),
+    );
     const optimizedRequest = { ...requestData, model, messages: optimized.messages };
     const optimizedTokens = countTokens(optimizedRequest.messages || [], model);
     const savings = estimateSavings(originalTokens, optimizedTokens, model);
@@ -329,7 +374,8 @@ const server = http.createServer(async (req, res) => {
     // ── Streaming path ────────────────────────────────────────────────────────
     if (requestData.stream) {
       const abort = new AbortController();
-      req.on('close', () => abort.abort());
+      let clientDisconnected = false;
+      req.on('close', () => { clientDisconnected = true; abort.abort(); });
 
       let upstreamResponse;
       try {
@@ -366,12 +412,38 @@ const server = http.createServer(async (req, res) => {
         ...streamBadgrHdrs,
       });
 
+      const providerRequestId = upstreamResponse.headers.get('x-request-id') || upstreamResponse.headers.get('cf-ray') || null;
+      const startedAtIso = new Date(startedAt).toISOString();
       let firstChunkAt = 0;
+      let streamCompleted = false;
+      let outputTokensReceived = 0;
+      let providerUsageReported = false;
+      let sseBuffer = '';
+
       try {
         // Readable.fromWeb gives us reliable async iteration on Node 18+
         for await (const chunk of Readable.fromWeb(upstreamResponse.body)) {
           if (!firstChunkAt) firstChunkAt = Date.now();
           if (!res.writableEnded) res.write(chunk);
+
+          // Parse SSE lines to detect [DONE] and usage metadata
+          sseBuffer += chunk.toString('utf8');
+          const lines = sseBuffer.split('\n');
+          sseBuffer = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const data = line.slice(6).trim();
+            if (data === '[DONE]') { streamCompleted = true; continue; }
+            try {
+              const parsed = JSON.parse(data);
+              const usage = parsed?.usage;
+              if (usage && typeof usage === 'object') {
+                providerUsageReported = true;
+                const completionTokens = usage.completion_tokens ?? usage.output_tokens ?? 0;
+                if (completionTokens > 0) outputTokensReceived = completionTokens;
+              }
+            } catch { /* non-JSON SSE line */ }
+          }
         }
       } catch (err) {
         // Upstream or client disconnected mid-stream — not fatal
@@ -382,8 +454,10 @@ const server = http.createServer(async (req, res) => {
         if (!res.writableEnded) res.end();
       }
 
+      const endedAtIso = new Date().toISOString();
+      const chargeStatus = computeChargeStatus({ statusCode: upstreamResponse.status, clientDisconnected, timedOut: false, providerUsageReported });
       const latencyMs = firstChunkAt ? firstChunkAt - startedAt : Date.now() - startedAt;
-      const entry = buildLogEntry({ model, originalTokens, optimizedTokens, savings, route, optimized, cachedTokens: 0, latencyMs, statusCode: upstreamResponse.status, streaming: true });
+      const entry = buildLogEntry({ model, originalTokens, optimizedTokens, savings, route, optimized, cachedTokens: 0, latencyMs, statusCode: upstreamResponse.status, streaming: true, clientHeaders: badgrClientHeaders, providerRequestId, startedAtIso, endedAtIso, streamCompleted, clientDisconnected, timedOut: false, outputTokensReceived, providerUsageReported, chargeStatus });
       logSavings(entry);
       await saveRequestLog(entry);
       pushSavingsToBackend(entry);
@@ -404,7 +478,13 @@ const server = http.createServer(async (req, res) => {
 
     const cachedTokens = extractCachedTokens(upstreamData);
     const latencyMs = Date.now() - startedAt;
-    const entry = buildLogEntry({ model, originalTokens, optimizedTokens, savings, route, optimized, cachedTokens, latencyMs, statusCode, streaming: false });
+    const bufferedProviderRequestId = upstreamData?.id || null;
+    const bufferedStartedAtIso = new Date(startedAt).toISOString();
+    const bufferedEndedAtIso = new Date().toISOString();
+    const bufferedOutputTokens = upstreamData?.usage?.completion_tokens ?? upstreamData?.usage?.output_tokens ?? 0;
+    const bufferedUsageReported = !!(upstreamData?.usage);
+    const bufferedChargeStatus = computeChargeStatus({ statusCode, clientDisconnected: false, timedOut: false, providerUsageReported: bufferedUsageReported });
+    const entry = buildLogEntry({ model, originalTokens, optimizedTokens, savings, route, optimized, cachedTokens, latencyMs, statusCode, streaming: false, clientHeaders: badgrClientHeaders, providerRequestId: bufferedProviderRequestId, startedAtIso: bufferedStartedAtIso, endedAtIso: bufferedEndedAtIso, streamCompleted: statusCode < 400, clientDisconnected: false, timedOut: false, outputTokensReceived: bufferedOutputTokens, providerUsageReported: bufferedUsageReported, chargeStatus: bufferedChargeStatus });
     logSavings(entry);
     await saveRequestLog(entry);
     pushSavingsToBackend(entry);

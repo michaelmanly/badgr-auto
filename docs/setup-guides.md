@@ -16,11 +16,17 @@ For cloud-only use (no local proxy) replace the Base URL with `https://aibadgr.c
 
 ## Table of contents
 
+**Verified integrations** (end-to-end tested):
+
 - [Cline](#cline)
 - [Continue](#continue)
 - [Aider](#aider)
-- [OpenClaw](#openclaw)
 - [Open WebUI](#open-webui)
+- [OpenAI SDK](#custom-tools-and-internal-saas)
+
+**Community integrations** (OpenAI-compatible, not yet end-to-end verified — may need minor adjustments):
+
+- [OpenClaw](#openclaw)
 - [LibreChat](#librechat)
 - [Cursor](#cursor)
 - [Zed](#zed)
@@ -35,7 +41,10 @@ For cloud-only use (no local proxy) replace the Base URL with `https://aibadgr.c
 - [n8n](#n8n)
 - [CrewAI](#crewai)
 - [AutoGen](#autogen)
-- [Custom tools and internal SaaS](#custom-tools-and-internal-saas)
+
+---
+
+## Verified integrations
 
 ---
 
@@ -79,6 +88,12 @@ export OPENAI_API_BASE=http://localhost:8787/v1
 export OPENAI_API_KEY=<YOUR_BADGR_API_KEY>
 aider --model badgr-auto
 ```
+
+---
+
+## Community integrations
+
+> These tools are OpenAI-compatible and should work with badgr-auto, but have not been end-to-end verified. Configuration steps are based on each tool's documentation. Open an issue if something doesn't work.
 
 ---
 

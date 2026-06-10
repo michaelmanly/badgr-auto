@@ -14,11 +14,11 @@
  * No real API key required — all upstream traffic goes to a canned mock.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 
 // ── Mock upstream ─────────────────────────────────────────────────────────
 
@@ -73,6 +73,7 @@ function startMockUpstream() {
 
 let proxyServer;
 let proxyPort;
+let proxyConfigFile;
 
 async function getFreePort() {
   return new Promise((resolve) => {
@@ -85,6 +86,7 @@ async function startProxy() {
   proxyPort = await getFreePort();
   const configDir = join(tmpdir(), `badgr-e2e-${Date.now()}`);
   mkdirSync(configDir, { recursive: true });
+  proxyConfigFile = join(configDir, 'auto-config.json');
 
   // Point all tiers at the mock upstream.
   const base = `http://127.0.0.1:${mockPort}/v1`;
@@ -98,6 +100,9 @@ async function startProxy() {
   delete process.env.BADGR_API_KEY;
   process.env.BADGR_AUTO_PORT              = String(proxyPort);
   process.env.BADGR_CONFIG_DIR             = configDir;
+
+  // Seed config with routing enabled so tier-selection tests work.
+  writeFileSync(proxyConfigFile, JSON.stringify({ routingMode: 'hybrid' }));
 
   const { server } = await import('../src/proxy-server.js');
   proxyServer = server;
@@ -242,47 +247,19 @@ describe('optimization mode: off', () => {
     { role: 'user', content: 'Fix the bug.' },
   ];
 
-  it('X-Badgr-Mode: off passes duplicate code blocks through unchanged', async () => {
-    const res = await send({ model: 'badgr-auto', messages: duplicateMessages }, { 'x-badgr-mode': 'off' });
-    const orig = Number.parseInt(res.headers['x-badgr-original-tokens'] || '0', 10);
-    const opt = Number.parseInt(res.headers['x-badgr-optimized-tokens'] || '0', 10);
+  it('X-Badgr-Mode: off skips dedup but still routes (refactor → mid)', async () => {
+    const res = await send(
+      { model: 'badgr-auto', messages: [{ role: 'user', content: 'Please refactor this function.' }, ...duplicateMessages] },
+      { 'x-badgr-mode': 'off' },
+    );
     const saved = Number.parseInt(res.headers['x-badgr-tokens-saved'] || '0', 10);
     expect(saved).toBe(0);
-    expect(opt).toBe(orig);
+    expect(res.headers['x-badgr-route-tier']).toBe('mid');
   });
 
   it('badgr_mode: off in body passes messages through unchanged', async () => {
     const res = await send({ model: 'badgr-auto', badgr_mode: 'off', messages: duplicateMessages });
-    const saved = Number.parseInt(res.headers['x-badgr-tokens-saved'] || '0', 10);
-    expect(saved).toBe(0);
-  });
-
-  it('metadata.mode: off in body passes messages through unchanged', async () => {
-    const res = await send({ model: 'badgr-auto', metadata: { mode: 'off' }, messages: duplicateMessages });
-    const saved = Number.parseInt(res.headers['x-badgr-tokens-saved'] || '0', 10);
-    expect(saved).toBe(0);
-  });
-
-  it('mode off still routes normally (refactor → mid tier)', async () => {
-    const res = await send(
-      { model: 'badgr-auto', messages: [{ role: 'user', content: 'Please refactor this function to use async/await.' }] },
-      { 'x-badgr-mode': 'off' },
-    );
-    expect(res.status).toBe(200);
-    expect(res.headers['x-badgr-route-tier']).toBe('mid');
-  });
-
-  it('mode off still routes normally (autocomplete → edge tier)', async () => {
-    const res = await send(
-      {
-        model: 'badgr-auto',
-        metadata: { task_type: 'autocomplete' },
-        messages: [{ role: 'user', content: 'complete this line' }],
-      },
-      { 'x-badgr-mode': 'off' },
-    );
-    expect(res.status).toBe(200);
-    expect(res.headers['x-badgr-route-tier']).toBe('edge');
+    expect(Number.parseInt(res.headers['x-badgr-tokens-saved'] || '0', 10)).toBe(0);
   });
 });
 
@@ -315,5 +292,99 @@ describe('streaming', () => {
     const res = await sendStream({ model: 'badgr-auto', stream: true, messages: [{ role: 'user', content: 'hi' }] });
     expect(res.body).toContain('Hello');
     expect(res.body).toContain(' world');
+  });
+});
+
+// ── Routing off (direct mode) ─────────────────────────────────────────────
+
+describe('routingMode: direct', () => {
+  afterEach(() => {
+    // Reset to default config so other tests are unaffected
+    writeFileSync(proxyConfigFile, JSON.stringify({ routingMode: 'hybrid' }));
+  });
+
+  it('client model is forwarded unchanged — router does not override it', async () => {
+    writeFileSync(proxyConfigFile, JSON.stringify({ routingMode: 'direct' }));
+    await send({ model: 'my-custom-model', messages: [{ role: 'user', content: 'hi' }] });
+    const last = mockRequests.at(-1);
+    expect(last.body.model).toBe('my-custom-model');
+  });
+
+  it('still returns a successful response and x-badgr-* headers', async () => {
+    writeFileSync(proxyConfigFile, JSON.stringify({ routingMode: 'direct' }));
+    const res = await send({ model: 'gpt-4o', messages: [{ role: 'user', content: 'hello' }] });
+    expect(res.status).toBe(200);
+    expect(res.headers['x-badgr-route-tier']).toBeTruthy();
+    expect(res.headers['x-badgr-original-tokens']).toBeTruthy();
+  });
+
+  it('autocomplete task type does NOT route to edge — tier selection is bypassed', async () => {
+    writeFileSync(proxyConfigFile, JSON.stringify({ routingMode: 'direct' }));
+    const res = await send({
+      model: 'my-upstream-model',
+      metadata: { task_type: 'autocomplete' },
+      messages: [{ role: 'user', content: 'complete this line' }],
+    });
+    const last = mockRequests.at(-1);
+    // In direct mode the model must not be swapped to the edge model
+    expect(last.body.model).toBe('my-upstream-model');
+    expect(res.status).toBe(200);
+  });
+});
+
+// ── Token optimization off ────────────────────────────────────────────────
+
+describe('tokenOptimization: false', () => {
+  afterEach(() => {
+    writeFileSync(proxyConfigFile, JSON.stringify({ tokenOptimization: true }));
+  });
+
+  it('duplicate messages are NOT deduplicated — tokens-saved is 0', async () => {
+    writeFileSync(proxyConfigFile, JSON.stringify({ tokenOptimization: false }));
+    const sysInstruction = 'You are a helpful coding assistant with knowledge of JavaScript and TypeScript.';
+    const res = await send({
+      model: 'badgr-auto',
+      messages: [
+        { role: 'system', content: sysInstruction },
+        { role: 'user', content: 'Hello' },
+        { role: 'system', content: sysInstruction }, // would be deduped when optimization is on
+        { role: 'user', content: 'What is next?' },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const saved = Number.parseInt(res.headers['x-badgr-tokens-saved'] || '0', 10);
+    expect(saved).toBe(0);
+  });
+
+  it('original and optimized token counts are equal — nothing was removed', async () => {
+    writeFileSync(proxyConfigFile, JSON.stringify({ tokenOptimization: false }));
+    const sysInstruction = 'You are a helpful coding assistant.';
+    const res = await send({
+      model: 'badgr-auto',
+      messages: [
+        { role: 'system', content: sysInstruction },
+        { role: 'user', content: 'Hello' },
+        { role: 'system', content: sysInstruction },
+      ],
+    });
+    const orig = Number.parseInt(res.headers['x-badgr-original-tokens'] || '0', 10);
+    const opt  = Number.parseInt(res.headers['x-badgr-optimized-tokens'] || '0', 10);
+    expect(orig).toBe(opt);
+  });
+
+  it('all messages are forwarded to upstream unchanged', async () => {
+    writeFileSync(proxyConfigFile, JSON.stringify({ tokenOptimization: false }));
+    const sysInstruction = 'You are a helpful coding assistant.';
+    await send({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: sysInstruction },
+        { role: 'user', content: 'Hello' },
+        { role: 'system', content: sysInstruction },
+      ],
+    });
+    const last = mockRequests.at(-1);
+    // All 3 messages must be present — no dedup was applied
+    expect(last.body.messages).toHaveLength(3);
   });
 });

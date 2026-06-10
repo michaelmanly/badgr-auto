@@ -9,6 +9,9 @@ import { statsCommand }   from './commands/stats.js';
 import { modelsCommand }  from './commands/models.js';
 import { selectCommand }  from './commands/select.js';
 import { restartCommand } from './commands/restart.js';
+import { receiptsCommand, receiptCommand } from './commands/receipts.js';
+import { dashboardCommand } from './commands/dashboard.js';
+import { monitorCommand } from './commands/monitor.js';
 
 const HELP = `
 ${chalk.bold('Badgr Token Proxy')} (${chalk.cyan('badgr-auto')}) — local OpenAI-compatible context optimizer
@@ -39,6 +42,10 @@ ${chalk.bold('SAVINGS')}
   ${chalk.cyan('badgr-auto stats')}                   All-time token savings summary
   ${chalk.cyan('badgr-auto stats 1d')}                Last 24 hours
   ${chalk.cyan('badgr-auto stats 7d')}                Last 7 days
+  ${chalk.cyan('badgr-auto receipts')}               Recent request list
+  ${chalk.cyan('badgr-auto receipt <id>')}            Single request receipt
+  ${chalk.cyan('badgr-auto monitor')}                 Live request monitor
+  ${chalk.cyan('badgr-auto dashboard')}               Open savings dashboard
 
 ${chalk.bold('OPTIMIZATION RULES')}
   • Keep system prompts untouched
@@ -70,6 +77,10 @@ async function main() {
     case 'stop':    return stopCommand(chalk);
     case 'status':  return statusCommand(chalk);
     case 'stats':   return statsCommand(chalk, rest);
+    case 'receipts':  return receiptsCommand(chalk, rest);
+    case 'receipt':   return receiptCommand(chalk, rest);
+    case 'dashboard': return dashboardCommand(chalk);
+    case 'monitor':   return monitorCommand(chalk);
     // Legacy local-model helpers remain for users who installed early builds.
     case 'models': return modelsCommand(chalk);
     case 'select': return selectCommand(rest[0], chalk);

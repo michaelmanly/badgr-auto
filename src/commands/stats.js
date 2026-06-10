@@ -1,11 +1,21 @@
 import { readSavingsStats, REQUEST_LOG_DB } from '../db.js';
-import { estimateHaikuCost, estimateSonnetCost } from '../pricing.js';
 
 const PERIODS = [
   { key: '1d',  label: 'Last 24 hours' },
   { key: '7d',  label: 'Last 7 days' },
   { key: 'all', label: 'All time' },
 ];
+
+function fmtTokens(n) {
+  if (!n) return '0';
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return n.toLocaleString();
+}
+
+function col(label, value, width = 44) {
+  return `  ${label.padEnd(width - value.length - 2)}${value}`;
+}
 
 export async function statsCommand(chalk, args = []) {
   const periodArg = args[0] || 'all';
@@ -35,69 +45,40 @@ export async function statsCommand(chalk, args = []) {
     return;
   }
 
-  const avgPct       = typeof stats.avg_saved_pct === 'number' ? stats.avg_saved_pct.toFixed(1) : '0.0';
-  const latency      = typeof stats.avg_latency_ms === 'number' ? Math.round(stats.avg_latency_ms) : 0;
-  const origTok      = (stats.total_original || 0).toLocaleString();
-  const savedTok     = (stats.total_saved || 0).toLocaleString();
-  const totalOptimized = stats.total_optimized || 0;
-  const totalCached  = stats.total_cached || 0;
-  const actualCost   = stats.total_actual_cost ?? 0;
-
-  // Reference costs: what Haiku / Sonnet would have charged for the same optimized tokens
-  const haikuCost  = estimateHaikuCost(totalOptimized);
-  const sonnetCost = estimateSonnetCost(totalOptimized);
-  const savedVsHaiku  = Math.max(haikuCost - actualCost, 0);
-  const savedVsSonnet = Math.max(sonnetCost - actualCost, 0);
+  const avgPct   = typeof stats.avg_saved_pct === 'number' ? Math.round(stats.avg_saved_pct) : 0;
+  const actualCost = stats.total_actual_cost ?? 0;
+  const savedVsSonnet = stats.total_saved_vs_sonnet ?? 0;
+  const savedVsHaiku  = stats.total_saved_vs_haiku  ?? 0;
+  const removedTok = stats.total_context_tokens_removed ?? stats.total_saved ?? 0;
+  const fallbacks  = stats.fallbacks_used ?? 0;
 
   console.log();
-  console.log(chalk.bold(`  Estimated savings — ${label}`));
+  console.log(chalk.bold(`  Badgr Auto — ${label}`));
+  console.log();
+  console.log(col('Estimated saved vs Sonnet:', chalk.green(`$${savedVsSonnet.toFixed(2)}`)));
+  console.log(col('Estimated saved vs Haiku:', chalk.green(`$${savedVsHaiku.toFixed(2)}`)));
+  console.log(col('Actual cloud spend:', chalk.cyan(`$${actualCost.toFixed(2)}`)));
+  console.log();
+  console.log(col('Tokens safely removed:', chalk.green(fmtTokens(removedTok))));
+  console.log(col('Average reduction:', chalk.green(`${avgPct}%`)));
+  console.log(col('Requests optimized:', chalk.cyan(stats.requests.toLocaleString())));
   console.log();
 
-  // ── 1. Context optimization ───────────────────────────────────────────────
-  console.log(chalk.bold('  Context optimization'));
-  console.log();
-  console.log(`  Requests:                  ${chalk.cyan(stats.requests.toLocaleString())}`);
-  console.log(`  Original tokens:           ${chalk.dim(origTok)}`);
-  console.log(`  Optimized tokens:          ${chalk.green(totalOptimized.toLocaleString())}`);
-  console.log(`  Tokens safely removed:     ${chalk.green(savedTok)}`);
-  console.log(`  Average context reduction: ${chalk.green(`${avgPct}%`)}`);
-  console.log();
-
-  // ── 2. Prompt caching ─────────────────────────────────────────────────────
-  console.log(chalk.bold('  Prompt caching'));
-  console.log();
-  if (totalCached > 0) {
-    console.log(`  Cached input tokens:       ${chalk.green(totalCached.toLocaleString())}`);
-  } else {
-    console.log(`  Cached input tokens:       ${chalk.dim('none reported by upstream')}`);
-  }
-  console.log();
-
-  // ── 3. Routing savings ────────────────────────────────────────────────────
-  console.log(chalk.bold('  Routing savings'));
-  console.log();
-  console.log(`  Actual cost:               ${chalk.green(`$${actualCost.toFixed(2)}`)}`);
-  console.log();
-  console.log(`  Saved vs Claude Haiku:     ${chalk.green(`$${savedVsHaiku.toFixed(2)}`)}`);
-  console.log(`  Saved vs Claude Sonnet:    ${chalk.green(`$${savedVsSonnet.toFixed(2)}`)}`);
-  console.log();
-
-  // ── Routes breakdown ──────────────────────────────────────────────────────
+  // Routes
   const localPct   = stats.local_pct   ?? 0;
   const midPct     = stats.mid_pct     ?? 0;
   const asyncPct   = stats.async_pct   ?? 0;
   const premiumPct = stats.premium_pct ?? 0;
-
   if (localPct + midPct + asyncPct + premiumPct > 0) {
     console.log('  Routes:');
-    if (localPct > 0)   console.log(`    Local:            ${localPct}%`);
-    if (midPct > 0)     console.log(`    OSS cloud:        ${midPct}%`);
-    if (asyncPct > 0)   console.log(`    Async GPU:        ${asyncPct}%`);
-    if (premiumPct > 0) console.log(`    Premium:          ${premiumPct}%`);
+    if (localPct   > 0) console.log(col('  Local', `${localPct}%`));
+    if (midPct     > 0) console.log(col('  OSS cloud', `${midPct}%`));
+    if (asyncPct   > 0) console.log(col('  Async GPU', `${asyncPct}%`));
+    if (premiumPct > 0) console.log(col('  Premium', `${premiumPct}%`));
     console.log();
   }
 
-  console.log(`  Avg latency:               ${chalk.dim(`${latency}ms`)}`);
+  console.log(col('Fallbacks used:', String(fallbacks)));
   console.log();
   console.log(chalk.dim(`  Local log: ${REQUEST_LOG_DB}`));
   console.log();

@@ -1,4 +1,5 @@
-import { spawn } from 'child_process';
+import { spawn, exec } from 'child_process';
+import http from 'node:http';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { select, input } from '@inquirer/prompts';
@@ -18,7 +19,7 @@ const __dirname  = dirname(__filename);
 const PROXY_SCRIPT = join(__dirname, '..', 'proxy-server.js');
 const PROXY_URL    = `http://localhost:${PROXY_PORT}/v1`;
 
-function parseArgs(args) {
+export function parseArgs(args) {
   const updates = {};
   let forceWizard = false;
   let forceRestart = false;
@@ -29,6 +30,8 @@ function parseArgs(args) {
     }
     if (args[i] === '--threshold' && args[i + 1]) updates.compressionThresholdTokens = Number.parseInt(args[++i], 10);
     if (args[i] === '--recent' && args[i + 1]) updates.recentMessagesToKeep = Number.parseInt(args[++i], 10);
+    if (args[i] === '--no-route') updates.routingMode = 'direct';
+    if (args[i] === '--no-optimize') updates.tokenOptimization = false;
     if (args[i] === '--setup') forceWizard = true;
     if (args[i] === '--force') forceRestart = true;
   }
@@ -68,7 +71,31 @@ export const ROUTING_CHOICES = [
     value: 'hybrid',
     short: 'Local + cloud',
   },
+  {
+    name: 'Direct  (Routing off)\n    Forward all requests straight to your upstream — no tier selection, model unchanged',
+    value: 'direct',
+    short: 'Direct (routing off)',
+  },
 ];
+
+export const OUTCOME_CHOICES = [
+  {
+    name: 'Token optimization only  (Recommended)\n    Keep your current models. Remove repeated structured context. Show savings.',
+    value: 'token-only',
+    short: 'Token optimization only',
+  },
+  {
+    name: 'Everything\n    Token optimization + routing to cheaper models + fallback + optional local models.',
+    value: 'everything',
+    short: 'Everything',
+  },
+];
+
+// Outcome → proxy config mapping
+const OUTCOME_MAP = {
+  'token-only': { tokenOptimization: true, routingMode: 'direct', savingsStats: true, needsCloud: false, needsLocal: false },
+  'everything': { tokenOptimization: true, routingMode: 'hybrid', savingsStats: true, needsCloud: true,  needsLocal: true  },
+};
 
 export const LOCAL_SERVER_URLS = {
   ollama: 'http://localhost:11434',
@@ -80,135 +107,211 @@ export const ONBOARDING_PROMPTS = {
   cloud: 'Review this backend architecture for security risks.',
 };
 
-async function _runFastStart(chalk, config, cliUpdates) {
-  if (cliUpdates.upstreamBaseUrl) {
-    saveProxyConfig(cliUpdates);
-  } else if (config.apiKey && config.baseUrl) {
-    const upstream = config.baseUrl.replace(/\/+$/, '');
-    saveProxyConfig({ upstreamBaseUrl: upstream, midBaseUrl: upstream, ...cliUpdates });
-  }
-  const pid = launchProxyProcess();
-  writeProxyPid(pid);
+function _openBrowser(url) {
+  const cmd = process.platform === 'win32' ? `start "" "${url}"`
+    : process.platform === 'darwin' ? `open "${url}"`
+    : `xdg-open "${url}"`;
+  exec(cmd, () => {});
+}
+
+async function _findFreePort() {
+  return new Promise((resolve) => {
+    const srv = http.createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const port = srv.address().port;
+      srv.close(() => resolve(port));
+    });
+    srv.on('error', () => resolve(null));
+  });
+}
+
+async function _waitForCallbackKey(port, timeoutMs = 60000) {
+  if (!port) return null;
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (key) => {
+      if (settled) return;
+      settled = true;
+      try { server.close(); } catch { /* already closed */ }
+      resolve(key);
+    };
+    const server = http.createServer((req, res) => {
+      try {
+        const url = new URL(req.url, `http://localhost:${port}`);
+        const key = url.searchParams.get('key') || url.searchParams.get('api_key') || url.searchParams.get('token');
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end('<!DOCTYPE html><html><body style="font-family:sans-serif;padding:2rem"><h2>&#x2713; Connected to AI Badgr Auto</h2><p>You can close this tab and return to your terminal.</p></body></html>');
+        done(key || null);
+      } catch { done(null); }
+    });
+    server.on('error', () => done(null));
+    server.listen(port, '127.0.0.1');
+    setTimeout(() => done(null), timeoutMs);
+  });
+}
+
+async function _runLoginFlow(chalk) {
+  console.log(`  ${chalk.cyan('https://aibadgr.com/login')}`);
   console.log();
-  console.log(chalk.green('  ✓ Badgr Auto running at ' + PROXY_URL));
-  _printConnectionBlock(chalk, config);
+  console.log('  Opening browser…');
+
+  const callbackPort = await _findFreePort();
+  const callbackUrl  = callbackPort ? `http://localhost:${callbackPort}/callback` : null;
+  const loginUrl     = callbackUrl
+    ? `https://aibadgr.com/login?cli_callback=${encodeURIComponent(callbackUrl)}`
+    : 'https://aibadgr.com/login';
+
+  _openBrowser(loginUrl);
+
+  let apiKey = null;
+  if (callbackPort) {
+    process.stdout.write('  Waiting for sign-in');
+    const dotInterval = setInterval(() => process.stdout.write('.'), 1500);
+    apiKey = await _waitForCallbackKey(callbackPort, 60000);
+    clearInterval(dotInterval);
+    process.stdout.write('\r' + ' '.repeat(50) + '\r');
+  }
+
+  if (!apiKey) {
+    try {
+      apiKey = await input({
+        message: '  Paste your AI Badgr API key (or press Enter to skip):',
+      });
+    } catch { /* ctrl-c */ }
+  }
+
+  if (!apiKey?.trim()) {
+    console.log('  Skipped. Run ' + chalk.cyan('badgr-auto login') + ' later to connect your account.');
+    console.log();
+    return;
+  }
+
+  saveConfig({ apiKey: apiKey.trim(), baseUrl: DEFAULTS.baseUrl });
+  const saved = loadConfig();
+  try {
+    const res = await fetch(`${saved.baseUrl}/models`, {
+      headers: { Authorization: `Bearer ${saved.apiKey}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.status === 401 || res.status === 403) {
+      console.log(chalk.yellow('  ⚠ API key not accepted. Run badgr-auto login to try again.'));
+      return;
+    }
+  } catch { /* offline — save anyway */ }
+
+  console.log(chalk.green('  ✓ Signed in to AI Badgr'));
+  console.log();
 }
 
 async function _runWizard(chalk, cliUpdates) {
-  const config = loadConfig();
-
-  // ── Guided onboarding ──────────────────────────────────────────────────
   console.log();
   console.log(chalk.bold('  Welcome to AI Badgr Auto.'));
   console.log();
 
-  // Step 1 — routing mode
-  const mode = await select({
-    message: 'How do you want to run AI requests?',
-    choices: ROUTING_CHOICES,
-    default: ROUTING_DEFAULT,
-  });
+  // ── Step 1 — What do you want? ─────────────────────────────────────────
+  let outcome = 'token-only';
+  try {
+    outcome = await select({
+      message: 'What do you want?',
+      choices: OUTCOME_CHOICES,
+      default: 'token-only',
+    });
+  } catch { /* ctrl-c — use default */ }
 
   console.log();
 
-  // Step 2 — detect local models + hardware
-  console.log('  Checking local model servers…');
-  console.log();
-  console.log(`    Ollama     → ${LOCAL_SERVER_URLS.ollama}`);
-  console.log(`    LM Studio  → ${LOCAL_SERVER_URLS.lmstudio}`);
-  console.log();
-  const noLoadFallback = { vramGb: 0, ramGb: 0, cpuCores: 0, recommended: null, systemLoad: { vramUsedPct: 0, ramUsedPct: 0, isHighLoad: false } };
-  const [servers, hw] = await Promise.all([
-    detectLocalServers(),
-    (async () => { try { return detectHardware(); } catch { return noLoadFallback; } })(),
-  ]);
+  const settings = OUTCOME_MAP[outcome] || OUTCOME_MAP['token-only'];
 
-  const ramLabel  = `${hw.ramGb.toFixed(1)} GB RAM`;
-  const vramLabel = hw.vramGb > 0 ? `${hw.vramGb.toFixed(1)} GB VRAM` : 'no discrete GPU detected';
-  const cpuLabel  = `${hw.cpuCores} CPU cores`;
-  console.log(`  Hardware: ${ramLabel}, ${vramLabel}, ${cpuLabel}`);
-  console.log();
+  // ── Step 2 — Login ─────────────────────────────────────────────────────
+  const config = loadConfig();
+  if (settings.needsCloud && !config.apiKey) {
+    await _runLoginFlow(chalk);
+  } else if (config.apiKey) {
+    console.log(chalk.green(`  ✓ Signed in (${config.apiKey.slice(0, 8)}…)`));
+    console.log();
+  }
 
+  // ── Step 3 — Detect environment ────────────────────────────────────────
   let localBaseUrl = '';
   let localModel   = '';
 
-  // If the machine is already under heavy load, skip local entirely.
-  if (hw.systemLoad.isHighLoad) {
-    console.log(chalk.yellow(`  System load is high (GPU: ${hw.systemLoad.vramUsedPct}%, RAM: ${hw.systemLoad.ramUsedPct}%) — skipping local, routing all requests to cloud.`));
-    console.log();
-  } else if (servers.length > 0) {
-    for (const s of servers) {
-      console.log(chalk.green(`  ✓ ${s.name} detected at ${s.url}`));
-      if (s.models.length) {
-        console.log(`    Models: ${s.models.slice(0, 4).join(', ')}${s.models.length > 4 ? ` +${s.models.length - 4} more` : ''}`);
-      }
-    }
+  if (settings.needsLocal) {
+    const noLoadFallback = { vramGb: 0, ramGb: 0, cpuCores: 0, recommended: null, systemLoad: { vramUsedPct: 0, ramUsedPct: 0, isHighLoad: false } };
+    process.stdout.write('  Checking Ollama…');
+    const [servers, hw] = await Promise.all([
+      detectLocalServers(),
+      (async () => { try { return detectHardware(); } catch { return noLoadFallback; } })(),
+    ]);
+    process.stdout.write('\r' + ' '.repeat(30) + '\r');
+
+    console.log('  Checking Ollama…');
+    console.log('  Checking LM Studio…');
+    console.log('  Checking available hardware…');
     console.log();
 
-    const primary = servers[0];
-    localBaseUrl  = `${primary.url}/v1`;
-
-    if (primary.models.length) {
-      const autoModel = selectBestLocalModel(primary.models, hw.vramGb, hw.ramGb);
-      if (autoModel) {
-        localModel = autoModel;
-        console.log(`  Auto-selected local model: ${chalk.cyan(localModel)}`);
-        if (hw.recommended) {
-          console.log(`  Hardware tier: ${chalk.dim(hw.recommended.label)}`);
+    if (hw.systemLoad.isHighLoad) {
+      console.log(chalk.yellow(`  System load is high (GPU: ${hw.systemLoad.vramUsedPct}%, RAM: ${hw.systemLoad.ramUsedPct}%) — local models skipped.`));
+    } else if (servers.length > 0) {
+      for (const s of servers) {
+        console.log(chalk.green(`  ✓ ${s.name} detected at ${s.url}`));
+        if (s.models.length) {
+          console.log(`    Models: ${s.models.slice(0, 4).join(', ')}${s.models.length > 4 ? ` +${s.models.length - 4} more` : ''}`);
         }
-      } else {
-        console.log(chalk.yellow('  No installed model fits your hardware tier — routing to cloud.'));
-        localBaseUrl = '';
       }
       console.log();
-    }
-  } else {
-    console.log(chalk.yellow('  No local model server detected.'));
-    console.log();
-
-    if (hw.recommended) {
-      console.log(`  Your hardware (${vramLabel}, ${ramLabel}) can run: ${chalk.cyan(hw.recommended.name)} — ${hw.recommended.label}`);
-      console.log();
-      console.log('  Install Ollama and pull the recommended model:');
-      console.log();
-      console.log(`    ${chalk.cyan('# 1. Install Ollama')}`);
-      console.log(`    ${chalk.cyan('https://ollama.com')}`);
-      console.log();
-      console.log(`    ${chalk.cyan(`# 2. Pull the recommended model`)}`);
-      console.log(`    ${chalk.cyan(`ollama pull ${hw.recommended.name}`)}`);
-      console.log();
+      const primary = servers[0];
+      localBaseUrl  = `${primary.url}/v1`;
+      if (primary.models.length) {
+        const autoModel = selectBestLocalModel(primary.models, hw.vramGb, hw.ramGb);
+        if (autoModel) {
+          localModel = autoModel;
+          console.log(`  Auto-selected: ${chalk.cyan(localModel)}`);
+        } else {
+          console.log(chalk.yellow('  No installed model fits your hardware — routing to cloud.'));
+          localBaseUrl = '';
+        }
+      }
     } else {
-      console.log('  Your machine may not have enough memory for a local model.');
-      console.log('  Install Ollama and try: ' + chalk.cyan('ollama pull phi3:mini') + ' (requires ~4 GB RAM)');
-      console.log(`  ${chalk.cyan('https://ollama.com')}`);
-      console.log();
+      console.log(chalk.yellow('  No local model server detected.'));
+      if (hw.recommended) {
+        console.log(`  To use local models: ${chalk.cyan(`ollama pull ${hw.recommended.name}`)}`);
+        console.log(`  ${chalk.dim('https://ollama.com')}`);
+      } else {
+        console.log(`  Install Ollama: ${chalk.dim('https://ollama.com')}`);
+      }
     }
-
-    if (mode === 'local') {
-      console.log(chalk.yellow('  Local-only mode requires a running Ollama or LM Studio server.'));
-      console.log('  Start Ollama, then re-run ' + chalk.cyan('badgr-auto start') + '.');
-      console.log();
-      return;
-    }
-
-    console.log('  Continuing with cloud-only routing until a local server is available.');
     console.log();
   }
 
-  // Step 3 — run local test (proxy must be started temporarily)
-  const proxyConfig = { ...cliUpdates };
+  // ── Step 4 — Show what will happen ─────────────────────────────────────
+  const { tokenOptimization, routingMode } = settings;
+  console.log('  Your setup:');
+  console.log(`    Token optimization: ${chalk.cyan('on')}`);
+  if (routingMode === 'hybrid') {
+    console.log(`    Routing:            ${chalk.cyan('on — cheapest capable model per request')}`);
+    console.log(`    Local models:       ${chalk.cyan(localBaseUrl ? 'on when safe' : 'off (no server detected)')}`);
+    console.log(`    Fallback:           ${chalk.cyan('cloud enabled')}`);
+  } else {
+    console.log(`    Routing:            ${chalk.cyan('off — your models unchanged')}`);
+  }
+  console.log(`    Savings tracking:   ${chalk.cyan('on')}`);
+  console.log();
+
+  // ── Build + save config ─────────────────────────────────────────────────
+  const proxyUpdates = { ...cliUpdates, tokenOptimization, routingMode, savingsStats };
   if (localBaseUrl) {
-    proxyConfig.edgeBaseUrl  = localBaseUrl;
-    proxyConfig.edgeModel    = localModel;
+    proxyUpdates.edgeBaseUrl = localBaseUrl;
+    proxyUpdates.edgeModel   = localModel;
   }
-
-  if (mode === 'hybrid' && config.baseUrl) {
-    const upstream = config.baseUrl.replace(/\/+$/, '');
-    proxyConfig.upstreamBaseUrl = upstream;
-    proxyConfig.midBaseUrl      = upstream;
+  const freshConfig = loadConfig();
+  if (freshConfig.baseUrl) {
+    const upstream = freshConfig.baseUrl.replace(/\/+$/, '');
+    proxyUpdates.upstreamBaseUrl = upstream;
+    proxyUpdates.midBaseUrl      = upstream;
   }
+  saveProxyConfig(proxyUpdates);
 
-  saveProxyConfig(proxyConfig);
+  // ── Step 5 — Start proxy ────────────────────────────────────────────────
   const pid = launchProxyProcess();
   writeProxyPid(pid);
 
@@ -222,104 +325,30 @@ async function _runWizard(chalk, cliUpdates) {
     return;
   }
 
-  if (localBaseUrl) {
-    console.log('  Testing local route…');
-    console.log();
-    const localPrompt = `${ONBOARDING_PROMPTS.local} function add(a,b){return a+b;}`;
-    console.log('    Prompt:');
-    console.log(`    ${ONBOARDING_PROMPTS.local}`);
-    console.log();
-    const localResult = await probeProxy(PROXY_PORT, localPrompt);
-    if (localResult.ok) {
-      const saved = localResult.tokensBefore - localResult.tokensAfter;
-      const pct   = localResult.tokensBefore > 0 ? Math.round(saved / localResult.tokensBefore * 100) : 0;
-      console.log(chalk.green('  ✓ Local model responded'));
-      console.log(chalk.green(`  ✓ Route: local ${servers[0]?.name || 'model'}`));
-      if (localResult.tokensBefore > 0) {
-        console.log(chalk.green(`  ✓ Tokens before optimization: ${localResult.tokensBefore}`));
-        console.log(chalk.green(`  ✓ Tokens after optimization:  ${localResult.tokensAfter}`));
-        if (saved > 0) console.log(chalk.green(`  ✓ Saved: ${saved} tokens (${pct}%)`));
-      }
-      console.log(chalk.green('  ✓ Cloud cost: $0.00'));
-    } else {
-      console.log(chalk.yellow('  Local model did not respond — it may still be loading. Continuing.'));
-    }
-    console.log();
-  }
-
-  // Step 4 — cloud escalation demo / login
-  if (mode === 'hybrid') {
-    console.log('  Testing cloud escalation…');
-    console.log();
-    console.log('    Prompt:');
-    console.log(`    ${ONBOARDING_PROMPTS.cloud}`);
-    console.log();
-    console.log('    This task needs a stronger cloud route.');
-    console.log();
-
-    if (!config.apiKey) {
-      console.log('  Connect your AI Badgr account to continue.');
-      console.log();
-      console.log(`  ${chalk.cyan('https://aibadgr.com/login')}`);
-      console.log();
-
-      let apiKey = '';
-      try {
-        apiKey = await input({
-          message: '  Paste your AI Badgr API key (or press Enter to skip):',
-        });
-      } catch {
-        // user hit ctrl-c — continue without key
-      }
-
-      if (apiKey.trim()) {
-        saveConfig({ apiKey: apiKey.trim(), baseUrl: DEFAULTS.baseUrl });
-        const saved = loadConfig();
-        const upstream = saved.baseUrl.replace(/\/+$/, '');
-        saveProxyConfig({ upstreamBaseUrl: upstream, midBaseUrl: upstream });
-
-        try {
-          const res = await fetch(`${saved.baseUrl}/models`, {
-            headers: { Authorization: `Bearer ${saved.apiKey}` },
-            signal: AbortSignal.timeout(8000),
-          });
-        } catch { /* offline — save anyway */ }
-
-        console.log();
-        console.log(chalk.green('  ✓ API key validated'));
-        console.log(chalk.green('  ✓ AI Badgr account connected'));
-        console.log(chalk.green('  ✓ Cloud routing unlocked'));
-        console.log(chalk.green('  ✓ Dashboard savings sync enabled'));
-        console.log();
-
-        // Step 6 — run a cloud test probe
-        console.log('  Testing AI Badgr cloud route…');
-        console.log();
-        const cloudResult = await probeProxy(
-          PROXY_PORT,
-          `${ONBOARDING_PROMPTS.cloud} List the top 3 concerns.`,
-          { apiKey: saved.apiKey },
-        );
-        if (cloudResult.ok) {
-          console.log(chalk.green('  ✓ Route: premium model'));
-          console.log(chalk.green('  ✓ Response received'));
-          console.log(chalk.green('  ✓ Fallback available'));
-          console.log(chalk.green('  ✓ Receipt created'));
-        } else {
-          console.log(chalk.yellow('  Cloud route probe failed — check your API key or network.'));
-        }
-        console.log();
-      } else {
-        console.log('  Skipped. Run ' + chalk.cyan('badgr-auto login') + ' later to enable cloud routing.');
-        console.log();
-      }
-    }
-  }
-
-  // Step 7 — ready
-  console.log(chalk.green('  ✓ AI Badgr Auto is ready'));
+  console.log(chalk.green('  Badgr Auto running:'));
+  console.log(chalk.cyan(`  ${PROXY_URL}`));
   console.log();
+
+  // ── Step 6 — Tool config ────────────────────────────────────────────────
   _printConnectionBlock(chalk, loadConfig());
+  const { monitorCommand } = await import('./monitor.js');
+  await monitorCommand(chalk);
+}
+
+async function _runFastStart(chalk, config, cliUpdates) {
+  if (cliUpdates.upstreamBaseUrl) {
+    saveProxyConfig(cliUpdates);
+  } else if (config.apiKey && config.baseUrl) {
+    const upstream = config.baseUrl.replace(/\/+$/, '');
+    saveProxyConfig({ upstreamBaseUrl: upstream, midBaseUrl: upstream, ...cliUpdates });
+  }
+  const pid = launchProxyProcess();
+  writeProxyPid(pid);
+  console.log();
+  console.log(chalk.green('  ✓ Badgr Auto running at ' + PROXY_URL));
+  _printConnectionBlock(chalk, config);
+  const { monitorCommand } = await import('./monitor.js');
+  await monitorCommand(chalk);
 }
 
 async function _restartProxy(chalk, cliUpdates) {

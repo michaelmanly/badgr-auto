@@ -1,6 +1,8 @@
 # badgr-auto
 
-Local AI proxy for Cline, Continue, Aider, and any OpenAI-compatible tool. Reduces token usage, compresses long sessions, and routes requests to the cheapest suitable model.
+Open-source local proxy that safely removes exact repeated structured context, optionally routes requests across models, and provides visibility into token savings—without changing your existing AI workflow.
+
+Works with Cline, Continue, Aider, Open WebUI, and any OpenAI-compatible tool.
 
 [Docs](https://aibadgr.com/docs/badgr-auto) · [GitHub](https://github.com/michaelmanly/badgr-auto) · [AI Badgr](https://aibadgr.com)
 
@@ -8,14 +10,12 @@ Local AI proxy for Cline, Continue, Aider, and any OpenAI-compatible tool. Reduc
 
 ```bash
 npm install -g badgr-auto
-badgr-auto start
+badgr-auto setup
 ```
 
-Use `-g` so `badgr-auto` is on your PATH. Without it, run `npx badgr-auto start`.
+## One-time setup
 
-## Connect your tool
-
-Point any OpenAI-compatible client at the local proxy:
+Point any OpenAI-compatible tool at the local proxy:
 
 ```text
 Base URL: http://localhost:8787/v1
@@ -23,25 +23,48 @@ API Key:  <YOUR_BADGR_API_KEY>
 Model:    badgr-auto
 ```
 
-For cloud-only use (no local proxy), point directly at `https://aibadgr.com/v1` with the same key.
+The setup wizard walks through this. Run `badgr-auto setup` to re-run it at any time.
 
-## Setup guides
+## What it does
 
-Step-by-step setup for Cline, Continue, Aider, Cursor, Zed, Roo Code, Kilo Code, Open WebUI, LibreChat, SillyTavern, AnythingLLM, Dify, Flowise, LangChain, LlamaIndex, n8n, CrewAI, AutoGen, and more:
+| Feature | Default | Flag |
+|---------|---------|------|
+| Token optimization | on | `--no-optimize` |
+| Smart routing | off | `--no-route` to keep off |
+| Local models (Ollama / LM Studio) | off | enable in setup |
+| Savings tracking | on | configure in setup |
 
-→ **[docs/setup-guides.md](docs/setup-guides.md)** — in this repo  
-→ **[aibadgr.com/docs/badgr-auto](https://aibadgr.com/docs/badgr-auto)** — full docs site
+**Token optimization** deduplicates exact repeated blocks—code, diffs, logs, retrieved docs—and summarizes older messages above 12 K tokens. System messages, tool calls, and function schemas are never touched.
+
+**Smart routing** routes requests to the cheapest suitable model tier (local → standard → premium) based on task complexity and token count. Requires an AI Badgr account.
+
+**Passthrough mode** (both off): requests forward unchanged to your upstream. Zero transformation, zero overhead.
+
+## Verified integrations
+
+End-to-end tested and confirmed working:
+
+- **[Cline](docs/setup-guides.md#cline)**
+- **[Continue](docs/setup-guides.md#continue)**
+- **[Aider](docs/setup-guides.md#aider)**
+- **[Open WebUI](docs/setup-guides.md#open-webui)**
+- **OpenAI SDK** — set `base_url` and `api_key`, any model name
+
+Full setup instructions: **[docs/setup-guides.md](docs/setup-guides.md)**
 
 ## Commands
 
 ```bash
-badgr-auto start    # start the proxy (runs setup on first run)
-badgr-auto stop     # stop the proxy
-badgr-auto restart  # restart with current config
-badgr-auto status   # show proxy status and routing config
-badgr-auto stats    # show token savings (1d / 7d / all)
-badgr-auto login    # save or update your AI Badgr API key
-badgr-auto models   # list detected local models
+badgr-auto setup     # run the setup wizard
+badgr-auto start     # start the proxy (wizard on first run)
+badgr-auto stop      # stop the proxy
+badgr-auto restart   # restart with current config
+badgr-auto status    # proxy status and routing config
+badgr-auto stats     # token savings (1d / 7d / all)
+badgr-auto login     # save or update your AI Badgr API key
+badgr-auto monitor   # live request monitor
+badgr-auto receipts  # per-request receipts
+badgr-auto models    # list detected local models
 ```
 
 ## Requirements

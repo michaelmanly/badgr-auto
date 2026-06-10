@@ -138,7 +138,7 @@ describe('optimizeMessages — conservative deduplication', () => {
     expect(result.removedBlocks).toHaveLength(0);
   });
 
-  it('optimizationMode off returns messages unchanged with no optimization applied', () => {
+  it('Off mode returns messages unchanged with no optimization applied', () => {
     const fileContent = '```typescript\n' + 'const x = 1;\n'.repeat(12) + '```';
     const messages = [
       { role: 'system', content: 'You are helpful.' },
@@ -146,7 +146,7 @@ describe('optimizeMessages — conservative deduplication', () => {
       { role: 'user', content: fileContent }, // would normally be deduped
     ];
 
-    const result = optimizeMessages(messages, { optimizationMode: 'off', compressionThresholdTokens: 1000 });
+    const result = optimizeMessages(messages, { mode: 'off', compressionThresholdTokens: 1000 });
 
     expect(result.didDedupe).toBe(false);
     expect(result.didCompress).toBe(false);
