@@ -80,4 +80,4 @@ badgr-auto models    # list detected local models
 
 ## License
 
-MIT
+[MIT](LICENSE)
