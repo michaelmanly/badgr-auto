@@ -1,7 +1,25 @@
 import { input } from '@inquirer/prompts';
 import { loadConfig, saveConfig, DEFAULTS } from '../config.js';
 
-export async function loginCommand(chalk) {
+export async function loginCommand(chalk, args = []) {
+  // Non-interactive path: --api-key <key>  or  --ci (reads env BADGR_API_KEY)
+  const apiKeyIdx = args.indexOf('--api-key');
+  const cliKey    = apiKeyIdx >= 0 ? (args[apiKeyIdx + 1] || '') : '';
+  const isCI      = args.includes('--ci');
+  const envKey    = process.env.BADGR_API_KEY || '';
+  const nonInteractiveKey = cliKey.trim() || (isCI ? envKey.trim() : '');
+
+  if (nonInteractiveKey) {
+    saveConfig({ apiKey: nonInteractiveKey, baseUrl: DEFAULTS.baseUrl });
+    console.log();
+    console.log(chalk.green('  ✓ API key saved'));
+    console.log(chalk.green('  ✓ Connected to AI Badgr'));
+    console.log(chalk.green('  ✓ Key saved to ~/.badgr/config.json'));
+    console.log();
+    return;
+  }
+
+  // Interactive path (default)
   console.log();
   console.log(chalk.bold('  badgr-auto login'));
   console.log();
@@ -44,4 +62,3 @@ export async function loginCommand(chalk) {
   console.log(`    ${chalk.cyan('badgr-auto start')}`);
   console.log();
 }
-

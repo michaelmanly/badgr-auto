@@ -5,7 +5,7 @@ import { dirname, join } from 'path';
 import { select, input } from '@inquirer/prompts';
 import {
   loadProxyConfig, saveProxyConfig,
-  readProxyPid, writeProxyPid, clearProxyPid, isProxyRunning, PROXY_PORT,
+  readProxyPid, writeProxyPid, clearProxyPid, isProxyRunning, PROXY_PORT, PROXY_PORTS, readProxyPort,
 } from '../proxy-config.js';
 import { loadConfig, saveConfig, DEFAULTS } from '../config.js';
 import { detectLocalServers } from '../detect.js';
@@ -17,6 +17,12 @@ import { stopCommand } from './stop.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const PROXY_SCRIPT = join(__dirname, '..', 'proxy-server.js');
+
+function getProxyUrl() {
+  return `http://localhost:${readProxyPort()}/v1`;
+}
+
+// Used in places that need a URL before the proxy starts (e.g. already-running path).
 const PROXY_URL    = `http://localhost:${PROXY_PORT}/v1`;
 
 export function parseArgs(args) {
@@ -32,6 +38,7 @@ export function parseArgs(args) {
     if (args[i] === '--recent' && args[i + 1]) updates.recentMessagesToKeep = Number.parseInt(args[++i], 10);
     if (args[i] === '--no-route') updates.routingMode = 'direct';
     if (args[i] === '--no-optimize') updates.tokenOptimization = false;
+    if (args[i] === '--eval-sample' && args[i + 1]) updates.evalSampleRate = parseFloat(args[++i]);
     if (args[i] === '--setup') forceWizard = true;
     if (args[i] === '--force') forceRestart = true;
   }
@@ -92,10 +99,26 @@ export const OUTCOME_CHOICES = [
 ];
 
 // Outcome → proxy config mapping
-const OUTCOME_MAP = {
+export const OUTCOME_MAP = {
   'token-only': { tokenOptimization: true, routingMode: 'direct', savingsStats: true, needsCloud: false, needsLocal: false },
   'everything': { tokenOptimization: true, routingMode: 'hybrid', savingsStats: true, needsCloud: true,  needsLocal: true  },
 };
+
+/** Build proxy config updates from wizard outcome settings (exported for tests). */
+export function buildWizardProxyUpdates(settings, cliUpdates = {}, { localBaseUrl = '', localModel = '', freshConfig = {} } = {}) {
+  const { tokenOptimization, routingMode, savingsStats } = settings;
+  const proxyUpdates = { ...cliUpdates, tokenOptimization, routingMode, savingsStats };
+  if (localBaseUrl) {
+    proxyUpdates.edgeBaseUrl = localBaseUrl;
+    proxyUpdates.edgeModel   = localModel;
+  }
+  if (freshConfig.baseUrl) {
+    const upstream = freshConfig.baseUrl.replace(/\/+$/, '');
+    proxyUpdates.upstreamBaseUrl = upstream;
+    proxyUpdates.midBaseUrl      = upstream;
+  }
+  return proxyUpdates;
+}
 
 export const LOCAL_SERVER_URLS = {
   ollama: 'http://localhost:11434',
@@ -298,25 +321,15 @@ async function _runWizard(chalk, cliUpdates) {
   console.log();
 
   // ── Build + save config ─────────────────────────────────────────────────
-  const proxyUpdates = { ...cliUpdates, tokenOptimization, routingMode, savingsStats };
-  if (localBaseUrl) {
-    proxyUpdates.edgeBaseUrl = localBaseUrl;
-    proxyUpdates.edgeModel   = localModel;
-  }
   const freshConfig = loadConfig();
-  if (freshConfig.baseUrl) {
-    const upstream = freshConfig.baseUrl.replace(/\/+$/, '');
-    proxyUpdates.upstreamBaseUrl = upstream;
-    proxyUpdates.midBaseUrl      = upstream;
-  }
-  saveProxyConfig(proxyUpdates);
+  saveProxyConfig(buildWizardProxyUpdates(settings, cliUpdates, { localBaseUrl, localModel, freshConfig }));
 
   // ── Step 5 — Start proxy ────────────────────────────────────────────────
   const pid = launchProxyProcess();
   writeProxyPid(pid);
 
   process.stdout.write('  Starting proxy…');
-  const ready = await waitForProxy(PROXY_PORT);
+  const ready = await waitForProxy(PROXY_PORTS);
   process.stdout.write('\r' + ' '.repeat(30) + '\r');
 
   if (!ready) {
@@ -325,8 +338,9 @@ async function _runWizard(chalk, cliUpdates) {
     return;
   }
 
+  const proxyUrl = getProxyUrl();
   console.log(chalk.green('  Badgr Auto running:'));
-  console.log(chalk.cyan(`  ${PROXY_URL}`));
+  console.log(chalk.cyan(`  ${proxyUrl}`));
   console.log();
 
   // ── Step 6 — Tool config ────────────────────────────────────────────────
@@ -344,8 +358,9 @@ async function _runFastStart(chalk, config, cliUpdates) {
   }
   const pid = launchProxyProcess();
   writeProxyPid(pid);
+  await waitForProxy(PROXY_PORTS);
   console.log();
-  console.log(chalk.green('  ✓ Badgr Auto running at ' + PROXY_URL));
+  console.log(chalk.green('  ✓ Badgr Auto running at ' + getProxyUrl()));
   _printConnectionBlock(chalk, config);
   const { monitorCommand } = await import('./monitor.js');
   await monitorCommand(chalk);
@@ -429,18 +444,23 @@ export async function setupCommand(chalk) {
 }
 
 function _printConnectionBlock(chalk, config) {
-  console.log(`  Proxy URL: ${chalk.cyan(PROXY_URL)}`);
+  const url = getProxyUrl();
+  console.log(`  Proxy URL: ${chalk.cyan(url)}`);
   console.log();
-  console.log('  Use these settings in Cline, Continue, Aider, or another OpenAI-compatible tool:');
+  console.log('  Use these settings in Cline, Continue, Aider, OpenClaw, or any OpenAI-compatible tool:');
   console.log();
-  console.log(`    Base URL: ${chalk.cyan(PROXY_URL)}`);
+  console.log(`    Base URL: ${chalk.cyan(url)}`);
   console.log(`    API Key:  ${chalk.dim(config.apiKey ? `${config.apiKey.slice(0, 8)}...` : '<your AI Badgr API key>')}`);
   console.log(`    Model:    ${chalk.cyan('badgr-auto')}`);
+  console.log();
+  console.log('  OpenAI SDK:');
+  console.log(`    ${chalk.dim('const openai = new OpenAI({ baseURL: \'' + url + '\' });')}`);
   console.log();
   console.log(`  ${chalk.dim('Docs:           https://aibadgr.com/docs/badgr-auto')}`);
   console.log(`  ${chalk.dim('Cline setup:    https://aibadgr.com/docs/cline')}`);
   console.log(`  ${chalk.dim('Continue setup: https://aibadgr.com/docs/continue')}`);
   console.log(`  ${chalk.dim('Aider setup:    https://aibadgr.com/docs/aider')}`);
+  console.log(`  ${chalk.dim('OpenClaw setup: https://aibadgr.com/docs/openclaw')}`);
   console.log(`  ${chalk.dim('GitHub:         https://github.com/michaelmanly/badgr-auto')}`);
   console.log();
   console.log(`  ${chalk.dim('badgr-auto stop')}       to shut down`);

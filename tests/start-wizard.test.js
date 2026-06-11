@@ -14,11 +14,13 @@
 import { describe, it, expect } from 'vitest';
 import {
   OUTCOME_CHOICES,
+  OUTCOME_MAP,
   ROUTING_CHOICES,
   ROUTING_DEFAULT,
   LOCAL_SERVER_URLS,
   ONBOARDING_PROMPTS,
   parseArgs,
+  buildWizardProxyUpdates,
 } from '../src/commands/start.js';
 
 // ── Outcome choices ───────────────────────────────────────────────────────
@@ -131,6 +133,30 @@ describe('setupCommand', () => {
   it('is exported from start.js', async () => {
     const mod = await import('../src/commands/start.js');
     expect(typeof mod.setupCommand).toBe('function');
+  });
+});
+
+describe('buildWizardProxyUpdates', () => {
+  for (const [outcome, settings] of Object.entries(OUTCOME_MAP)) {
+    it(`${outcome} includes savingsStats (regression: savingsStats is not defined)`, () => {
+      const updates = buildWizardProxyUpdates(settings, {}, {
+        freshConfig: { baseUrl: 'https://aibadgr.com/v1' },
+      });
+      expect(updates.savingsStats).toBe(true);
+      expect(updates.tokenOptimization).toBe(settings.tokenOptimization);
+      expect(updates.routingMode).toBe(settings.routingMode);
+      expect(updates.upstreamBaseUrl).toBe('https://aibadgr.com/v1');
+    });
+  }
+
+  it('adds local edge config when a server is detected', () => {
+    const updates = buildWizardProxyUpdates(OUTCOME_MAP.everything, {}, {
+      localBaseUrl: 'http://localhost:11434/v1',
+      localModel: 'qwen2.5-coder:7b',
+    });
+    expect(updates.edgeBaseUrl).toBe('http://localhost:11434/v1');
+    expect(updates.edgeModel).toBe('qwen2.5-coder:7b');
+    expect(updates.savingsStats).toBe(true);
   });
 });
 

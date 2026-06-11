@@ -95,9 +95,8 @@ async function startProxy() {
   process.env.BADGR_AUTO_EDGE_BASE_URL     = base;
   process.env.BADGR_AUTO_PREMIUM_BASE_URL  = base;
   process.env.BADGR_AUTO_ASYNC_BASE_URL    = base;
-  process.env.BADGR_AUTO_API_KEY           = 'e2e-test-key';
+  process.env.BADGR_API_KEY                = 'e2e-test-key';
   delete process.env.OPENAI_API_KEY;
-  delete process.env.BADGR_API_KEY;
   process.env.BADGR_AUTO_PORT              = String(proxyPort);
   process.env.BADGR_CONFIG_DIR             = configDir;
 
@@ -292,6 +291,237 @@ describe('streaming', () => {
     const res = await sendStream({ model: 'badgr-auto', stream: true, messages: [{ role: 'user', content: 'hi' }] });
     expect(res.body).toContain('Hello');
     expect(res.body).toContain(' world');
+  });
+});
+
+// ── Legacy text completions (/v1/completions) ─────────────────────────────
+
+function sendCompletions(body) {
+  const payload = JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { hostname: '127.0.0.1', port: proxyPort, path: '/v1/completions', method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } },
+      (res) => {
+        const raw = [];
+        res.on('data', c => raw.push(c));
+        res.on('end', () => {
+          const text = Buffer.concat(raw).toString();
+          let json; try { json = JSON.parse(text); } catch { json = { _raw: text }; }
+          resolve({ status: res.statusCode, headers: res.headers, body: json });
+        });
+        res.on('error', reject);
+      },
+    );
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+function sendCompletionsStream(body) {
+  const payload = JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { hostname: '127.0.0.1', port: proxyPort, path: '/v1/completions', method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } },
+      (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c.toString()));
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: chunks.join('') }));
+        res.on('error', reject);
+      },
+    );
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+describe('Legacy completions API (/v1/completions — Continue, Tabby, Aider)', () => {
+  it('returns text_completion object', async () => {
+    const res = await sendCompletions({
+      model: 'gpt-4o',
+      prompt: 'def hello():',
+      max_tokens: 64,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.object).toBe('text_completion');
+    expect(Array.isArray(res.body.choices)).toBe(true);
+    expect(typeof res.body.choices[0].text).toBe('string');
+    expect(res.body.usage).toBeDefined();
+  });
+
+  it('FIM: suffix field is forwarded in prompt to upstream', async () => {
+    await sendCompletions({
+      model: 'gpt-4o',
+      prompt: 'def hello():',
+      suffix: '\n    return "world"',
+      max_tokens: 32,
+    });
+    const last = mockRequests.at(-1);
+    expect(last.body.messages[0].content).toContain('<suffix>');
+    expect(last.body.messages[0].content).toContain('return "world"');
+  });
+
+  it('includes x-badgr-* headers', async () => {
+    const res = await sendCompletions({ model: 'gpt-4o', prompt: 'hello', max_tokens: 10 });
+    expect(res.headers['x-badgr-original-tokens']).toBeTruthy();
+    expect(res.headers['x-badgr-route-tier']).toBeTruthy();
+  });
+
+  it('streaming returns text_completion SSE chunks and [DONE]', async () => {
+    const res = await sendCompletionsStream({
+      model: 'gpt-4o',
+      prompt: 'def foo():',
+      max_tokens: 32,
+      stream: true,
+    });
+    expect(res.headers['content-type']).toContain('text/event-stream');
+    expect(res.body).toContain('[DONE]');
+    expect(res.body).toContain('text_completion');
+  });
+});
+
+// ── Anthropic Messages API (/v1/messages) ─────────────────────────────────
+
+function sendMessages(body, extraHeaders = {}) {
+  const payload = JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { hostname: '127.0.0.1', port: proxyPort, path: '/v1/messages', method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), ...extraHeaders } },
+      (res) => {
+        const raw = [];
+        res.on('data', c => raw.push(c));
+        res.on('end', () => {
+          const text = Buffer.concat(raw).toString();
+          let json; try { json = JSON.parse(text); } catch { json = { _raw: text }; }
+          resolve({ status: res.statusCode, headers: res.headers, body: json });
+        });
+        res.on('error', reject);
+      },
+    );
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+function sendMessagesStream(body) {
+  const payload = JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { hostname: '127.0.0.1', port: proxyPort, path: '/v1/messages', method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } },
+      (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c.toString()));
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, chunks, body: chunks.join('') }));
+        res.on('error', reject);
+      },
+    );
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+describe('Anthropic Messages API (/v1/messages)', () => {
+  it('returns Anthropic message format for simple user message', async () => {
+    const res = await sendMessages({
+      model: 'claude-opus-4-5',
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: 'Hello' }],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.type).toBe('message');
+    expect(res.body.role).toBe('assistant');
+    expect(res.body.model).toBe('claude-opus-4-5');
+    expect(Array.isArray(res.body.content)).toBe(true);
+    expect(res.body.content[0].type).toBe('text');
+    expect(res.body.stop_reason).toBe('end_turn');
+    expect(res.body.usage).toBeDefined();
+  });
+
+  it('includes x-badgr-* headers', async () => {
+    const res = await sendMessages({
+      model: 'claude-opus-4-5',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    expect(res.headers['x-badgr-original-tokens']).toBeTruthy();
+    expect(res.headers['x-badgr-route-tier']).toBeTruthy();
+  });
+
+  it('system prompt is forwarded as system message to upstream', async () => {
+    await sendMessages({
+      model: 'claude-opus-4-5',
+      system: 'You are a concise assistant.',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const last = mockRequests.at(-1);
+    expect(last.body.messages[0].role).toBe('system');
+    expect(last.body.messages[0].content).toBe('You are a concise assistant.');
+  });
+
+  it('streaming returns Anthropic SSE events', async () => {
+    const res = await sendMessagesStream({
+      model: 'claude-opus-4-5',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    });
+    expect(res.headers['content-type']).toContain('text/event-stream');
+    expect(res.body).toContain('message_start');
+    expect(res.body).toContain('content_block_start');
+    expect(res.body).toContain('content_block_delta');
+    expect(res.body).toContain('message_stop');
+    expect(res.body).toContain('Hello');
+  });
+
+  it('tool_result user content is converted to OpenAI tool messages', async () => {
+    await sendMessages({
+      model: 'claude-opus-4-5',
+      messages: [
+        { role: 'user', content: 'What is 2+2?' },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'calculator', input: { expression: '2+2' } }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: '4' }] },
+      ],
+    });
+    const last = mockRequests.at(-1);
+    const toolMsg = last.body.messages.find(m => m.role === 'tool');
+    expect(toolMsg).toBeDefined();
+    expect(toolMsg.tool_call_id).toBe('toolu_1');
+    expect(toolMsg.content).toBe('4');
+  });
+});
+
+// ── Generic passthrough for unrecognised /v1/* paths ─────────────────────
+
+describe('Generic /v1/* passthrough (embeddings, audio, etc.)', () => {
+  it('unknown /v1/* route is forwarded to upstream, not 404', async () => {
+    // Mock upstream returns 200 for any request it receives.
+    // The passthrough must forward /v1/embeddings to the upstream and relay
+    // the upstream response back rather than returning a proxy 404.
+    const payload = JSON.stringify({ model: 'text-embedding-ada-002', input: ['hello'] });
+    const result = await new Promise((resolve, reject) => {
+      const req = http.request(
+        { hostname: '127.0.0.1', port: proxyPort, path: '/v1/embeddings', method: 'POST',
+          headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } },
+        (res) => {
+          const raw = [];
+          res.on('data', c => raw.push(c));
+          res.on('end', () => {
+            resolve({ status: res.statusCode });
+          });
+          res.on('error', reject);
+        },
+      );
+      req.on('error', reject);
+      req.write(payload);
+      req.end();
+    });
+    // The mock upstream returns 200 for everything, so the passthrough should relay that.
+    expect(result.status).toBe(200);
   });
 });
 

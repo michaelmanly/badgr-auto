@@ -1,0 +1,7 @@
+extensions/
+node_modules/
+tests/
+vitest.config.js
+pnpm-lock.yaml
+.DS_Store
+*.vsix

@@ -5,7 +5,7 @@ Setup instructions for every major OpenAI-compatible tool.
 **The same three values work everywhere:**
 
 ```text
-Base URL: http://localhost:8787/v1
+Base URL: http://localhost:51999/v1
 API Key:  <YOUR_BADGR_API_KEY>
 Model:    badgr-auto
 ```
@@ -53,7 +53,7 @@ For cloud-only use (no local proxy) replace the Base URL with `https://aibadgr.c
 In Cline's settings, choose **OpenAI Compatible** as the API provider and enter:
 
 ```text
-Base URL: http://localhost:8787/v1
+Base URL: http://localhost:51999/v1
 API Key:  <YOUR_BADGR_API_KEY>
 Model ID: badgr-auto
 ```
@@ -71,7 +71,7 @@ models:
   - name: AI Badgr Auto
     provider: openai
     model: badgr-auto
-    apiBase: http://localhost:8787/v1
+    apiBase: http://localhost:51999/v1
     apiKey: <YOUR_BADGR_API_KEY>
 ```
 
@@ -84,7 +84,7 @@ Versions before v1.0 use `~/.continue/config.json` with the same fields.
 Aider uses `OPENAI_*` env vars for OpenAI-compatible providers:
 
 ```bash
-export OPENAI_API_BASE=http://localhost:8787/v1
+export OPENAI_API_BASE=http://localhost:51999/v1
 export OPENAI_API_KEY=<YOUR_BADGR_API_KEY>
 aider --model badgr-auto
 ```
@@ -102,7 +102,7 @@ aider --model badgr-auto
 Add a custom provider in OpenClaw's config, or set env vars before launching:
 
 ```bash
-export OPENAI_API_BASE=http://localhost:8787/v1
+export OPENAI_API_BASE=http://localhost:51999/v1
 export OPENAI_API_KEY=<YOUR_BADGR_API_KEY>
 ```
 
@@ -114,10 +114,10 @@ Or set **Base URL** and **API Key** directly in the OpenClaw custom provider UI 
 
 1. Go to **Admin Settings → Connections → OpenAI**.
 2. Click **Add Connection**.
-3. Set the URL to `http://localhost:8787/v1` and paste your AI Badgr API key.
+3. Set the URL to `http://localhost:51999/v1` and paste your AI Badgr API key.
 4. Save. `badgr-auto` will appear in the model selector.
 
-> If Open WebUI runs in Docker and badgr-auto runs on your host, use `http://host.docker.internal:8787/v1` instead of `localhost`.
+> If Open WebUI runs in Docker and badgr-auto runs on your host, use `http://host.docker.internal:51999/v1` instead of `localhost`.
 
 ---
 
@@ -130,7 +130,7 @@ endpoints:
   custom:
     - name: "AI Badgr Auto"
       apiKey: "${BADGR_API_KEY}"
-      baseURL: "http://localhost:8787/v1"
+      baseURL: "http://localhost:51999/v1"
       models:
         default: ["badgr-auto"]
       titleConvo: true
@@ -144,7 +144,7 @@ Add `BADGR_API_KEY=<YOUR_BADGR_API_KEY>` to your `.env` file, then restart Libre
 ## Cursor
 
 1. Open **Settings** (`Cmd+,` / `Ctrl+,`) and go to **Models**.
-2. In the **Override OpenAI Base URL** field enter `http://localhost:8787/v1`.
+2. In the **Override OpenAI Base URL** field enter `http://localhost:51999/v1`.
 3. Enter your AI Badgr API key in the **OpenAI API Key** field.
 4. Click **+ Add Model** and type `badgr-auto`.
 5. Click **Verify** to confirm the connection.
@@ -161,7 +161,7 @@ Add to your Zed `settings.json`:
 {
   "language_models": {
     "openai": {
-      "api_url": "http://localhost:8787/v1",
+      "api_url": "http://localhost:51999/v1",
       "available_models": [
         {
           "name": "badgr-auto",
@@ -183,7 +183,7 @@ Enter your API key when Zed prompts for it, or set it through the Agent Panel.
 In the Roo Code settings panel, choose **OpenAI Compatible** as the API provider:
 
 ```text
-Base URL: http://localhost:8787/v1
+Base URL: http://localhost:51999/v1
 API Key:  <YOUR_BADGR_API_KEY>
 Model:    badgr-auto
 ```
@@ -195,7 +195,7 @@ Model:    badgr-auto
 In the Kilo Code settings panel, choose **OpenAI Compatible** as the API provider:
 
 ```text
-Base URL: http://localhost:8787/v1
+Base URL: http://localhost:51999/v1
 API Key:  <YOUR_BADGR_API_KEY>
 Model:    badgr-auto
 ```
@@ -205,7 +205,7 @@ Model:    badgr-auto
 ## SillyTavern
 
 1. Open **API Connections** and select **Chat Completion**.
-2. Set the **Custom Endpoint** to `http://localhost:8787/v1`.
+2. Set the **Custom Endpoint** to `http://localhost:51999/v1`.
 3. Enter your AI Badgr API key.
 4. Set the model name to `badgr-auto`.
 
@@ -217,7 +217,7 @@ Do not append `/chat/completions` — SillyTavern adds that automatically.
 
 1. Go to **Settings → LLM Preference**.
 2. Choose **Generic OpenAI** as the provider.
-3. Set **Base URL** to `http://localhost:8787/v1`.
+3. Set **Base URL** to `http://localhost:51999/v1`.
 4. Enter your AI Badgr API key and set the model name to `badgr-auto`.
 5. Set the context window size to match your chosen upstream model.
 
@@ -228,7 +228,7 @@ All workspace features — chat, RAG, and agents — work with this configuratio
 ## Dify
 
 1. Go to **Settings → Model Provider → OpenAI-Compatible**.
-2. Set the API endpoint to `http://localhost:8787/v1`.
+2. Set the API endpoint to `http://localhost:51999/v1`.
 3. Enter your AI Badgr API key and add `badgr-auto` as a model.
 
 You can override the model per app in the Dify app editor.
@@ -240,7 +240,7 @@ You can override the model per app in the Dify app editor.
 In any **ChatOpenAI** node, expand **Additional Parameters** and set:
 
 ```text
-Base Path: http://localhost:8787/v1
+Base Path: http://localhost:51999/v1
 ```
 
 Enter your AI Badgr API key in the node's API key field and use `badgr-auto` as the model name.
@@ -255,14 +255,14 @@ from langchain_openai import ChatOpenAI
 llm = ChatOpenAI(
     model="badgr-auto",
     openai_api_key="<YOUR_BADGR_API_KEY>",
-    openai_api_base="http://localhost:8787/v1",
+    openai_api_base="http://localhost:51999/v1",
 )
 ```
 
 Or use environment variables:
 
 ```bash
-export OPENAI_API_BASE=http://localhost:8787/v1
+export OPENAI_API_BASE=http://localhost:51999/v1
 export OPENAI_API_KEY=<YOUR_BADGR_API_KEY>
 ```
 
@@ -275,7 +275,7 @@ from llama_index.llms.openai_like import OpenAILike
 
 llm = OpenAILike(
     model="badgr-auto",
-    api_base="http://localhost:8787/v1",
+    api_base="http://localhost:51999/v1",
     api_key="<YOUR_BADGR_API_KEY>",
     is_chat_model=True,
     context_window=128000,
@@ -287,7 +287,7 @@ llm = OpenAILike(
 ## n8n
 
 1. In your workflow add an **OpenAI** node (or HTTP Request node for full control).
-2. Create a credential with **Base URL** set to `http://localhost:8787/v1` and your AI Badgr API key.
+2. Create a credential with **Base URL** set to `http://localhost:51999/v1` and your AI Badgr API key.
 3. Set the model to `badgr-auto`.
 
 All n8n AI Agent nodes that accept an OpenAI-compatible credential work the same way.
@@ -301,7 +301,7 @@ from crewai import LLM
 
 llm = LLM(
     model="openai/badgr-auto",
-    base_url="http://localhost:8787/v1",
+    base_url="http://localhost:51999/v1",
     api_key="<YOUR_BADGR_API_KEY>",
 )
 ```
@@ -309,7 +309,7 @@ llm = LLM(
 Or use environment variables:
 
 ```bash
-export OPENAI_API_BASE=http://localhost:8787/v1
+export OPENAI_API_BASE=http://localhost:51999/v1
 export OPENAI_API_KEY=<YOUR_BADGR_API_KEY>
 ```
 
@@ -324,7 +324,7 @@ config_list = [
     {
         "model": "badgr-auto",
         "api_key": "<YOUR_BADGR_API_KEY>",
-        "base_url": "http://localhost:8787/v1",
+        "base_url": "http://localhost:51999/v1",
     }
 ]
 ```
@@ -337,7 +337,7 @@ from autogen_ext.models.openai import OpenAIChatCompletionClient
 client = OpenAIChatCompletionClient(
     model="badgr-auto",
     api_key="<YOUR_BADGR_API_KEY>",
-    base_url="http://localhost:8787/v1",
+    base_url="http://localhost:51999/v1",
 )
 ```
 
@@ -348,7 +348,7 @@ client = OpenAIChatCompletionClient(
 Any tool or service that accepts an OpenAI-compatible base URL works with badgr-auto:
 
 ```text
-Base URL: http://localhost:8787/v1
+Base URL: http://localhost:51999/v1
 API Key:  <YOUR_BADGR_API_KEY>
 Model:    badgr-auto
 ```

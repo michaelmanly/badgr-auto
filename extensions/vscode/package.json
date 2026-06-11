@@ -1,0 +1,177 @@
+{
+  "name": "badgr-auto",
+  "displayName": "Badgr Auto — Save AI Coding Costs with Local Models, Smart Routing & Receipts",
+  "description": "Route AI coding requests across local Ollama, OSS cloud models, and premium models. Track savings, fallbacks, latency, and receipts directly in VS Code.",
+  "version": "0.1.0",
+  "publisher": "aibadgr",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/michaelmanly/badgr-auto",
+    "directory": "extensions/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/michaelmanly/badgr-auto/issues"
+  },
+  "homepage": "https://aibadgr.com/docs/badgr-auto",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Other"
+  ],
+  "keywords": [
+    "AI coding",
+    "local LLM",
+    "Ollama",
+    "OpenAI compatible",
+    "Claude",
+    "Copilot",
+    "Cline",
+    "Continue",
+    "Roo Code",
+    "Kilo Code",
+    "LLM proxy",
+    "AI cost savings",
+    "token savings",
+    "smart routing",
+    "AI observability",
+    "vLLM",
+    "LM Studio"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "badgr.startProxy",
+        "title": "Badgr: Start Proxy",
+        "icon": "$(play)"
+      },
+      {
+        "command": "badgr.stopProxy",
+        "title": "Badgr: Stop Proxy",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "badgr.openMonitor",
+        "title": "Badgr: Open Monitor"
+      },
+      {
+        "command": "badgr.showReceipts",
+        "title": "Badgr: Show Receipts"
+      },
+      {
+        "command": "badgr.copyBaseUrl",
+        "title": "Badgr: Copy Base URL"
+      },
+      {
+        "command": "badgr.setup",
+        "title": "Badgr: Setup Wizard"
+      },
+      {
+        "command": "badgr.configureTool",
+        "title": "Badgr: Configure Tool"
+      },
+      {
+        "command": "badgr.restoreToolConfig",
+        "title": "Badgr: Restore Tool Config from Backup"
+      },
+      {
+        "command": "badgr.refreshStatus",
+        "title": "Refresh",
+        "icon": "$(refresh)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "badgr-sidebar",
+          "title": "Badgr Auto",
+          "icon": "media/badgr.svg"
+        }
+      ]
+    },
+    "views": {
+      "badgr-sidebar": [
+        {
+          "id": "badgr.statusView",
+          "name": "Proxy Status"
+        },
+        {
+          "id": "badgr.toolsView",
+          "name": "Tool Setup"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "badgr.refreshStatus",
+          "when": "view == badgr.statusView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "badgr.startProxy",
+          "when": "view == badgr.statusView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "badgr.stopProxy",
+          "when": "view == badgr.statusView",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Badgr Auto",
+      "properties": {
+        "badgr.port": {
+          "type": "number",
+          "default": 8787,
+          "description": "Port the badgr-auto proxy listens on. Must match BADGR_AUTO_PORT env var if set."
+        },
+        "badgr.autoStartProxy": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically start the badgr-auto proxy when VS Code opens."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "compile-tests": "tsc -p tsconfig.test.json --outDir out",
+    "test:unit": "vitest run",
+    "test:vscode": "node out/test/suite/runTests.js",
+    "pretest:vscode": "npm run compile && npm run compile-tests",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/glob": "^8.1.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "20.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^8.3.0",
+    "@typescript-eslint/parser": "^8.3.0",
+    "@vscode/test-cli": "^0.0.10",
+    "@vscode/test-electron": "^2.4.0",
+    "glob": "^11.0.0",
+    "mocha": "^10.7.3",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.5.4",
+    "vitest": "^4.1.8",
+    "webpack": "^5.95.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  }
+}

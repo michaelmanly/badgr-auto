@@ -43,6 +43,37 @@ async function initDatabase() {
         streaming INTEGER NOT NULL DEFAULT 0
       )
     `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS eval_payloads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        original_messages TEXT NOT NULL,
+        optimized_messages TEXT NOT NULL,
+        removed_blocks TEXT,
+        model TEXT,
+        UNIQUE(request_id)
+      )
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS eval_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        safe INTEGER NOT NULL DEFAULT 0,
+        original_output TEXT,
+        optimized_output TEXT,
+        output_length_delta INTEGER,
+        tool_calls_match INTEGER NOT NULL DEFAULT 1,
+        finish_reason_match INTEGER NOT NULL DEFAULT 1,
+        missing_context_complaint INTEGER NOT NULL DEFAULT 0,
+        latency_original_ms INTEGER,
+        latency_optimized_ms INTEGER,
+        token_usage_original TEXT,
+        token_usage_optimized TEXT,
+        UNIQUE(request_id)
+      )
+    `);
     // Migrate existing tables that are missing columns added after initial release.
     for (const migration of [
       'ALTER TABLE request_logs ADD COLUMN streaming INTEGER NOT NULL DEFAULT 0',
@@ -64,6 +95,12 @@ async function initDatabase() {
       'ALTER TABLE request_logs ADD COLUMN output_tokens_received INTEGER NOT NULL DEFAULT 0',
       'ALTER TABLE request_logs ADD COLUMN provider_usage_reported INTEGER NOT NULL DEFAULT 0',
       'ALTER TABLE request_logs ADD COLUMN charge_status TEXT',
+      'ALTER TABLE request_logs ADD COLUMN context_used_percent REAL',
+      'ALTER TABLE request_logs ADD COLUMN compaction_recommended INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE request_logs ADD COLUMN files_read_count INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE request_logs ADD COLUMN relevant_files_count INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE request_logs ADD COLUMN tool_results_preserved INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE request_logs ADD COLUMN optimization_rules_applied TEXT',
     ]) {
       try { db.exec(migration); } catch { /* column already exists */ }
     }
@@ -110,12 +147,20 @@ export async function saveRequestLog(entry) {
     output_tokens_received: entry.outputTokensReceived ?? 0,
     provider_usage_reported: entry.providerUsageReported ? 1 : 0,
     charge_status: entry.chargeStatus || null,
+    context_used_percent: entry.contextUsedPercent ?? null,
+    compaction_recommended: entry.compactionRecommended ? 1 : 0,
+    files_read_count: entry.filesReadCount ?? 0,
+    relevant_files_count: entry.relevantFilesCount ?? 0,
+    tool_results_preserved: entry.toolResultsPreserved ?? 0,
+    optimization_rules_applied: entry.optimizationRulesApplied
+      ? JSON.stringify(entry.optimizationRulesApplied)
+      : null,
   };
 
   try {
     const db = await initDatabase();
     if (db) {
-      db.prepare(`
+      const insertResult = db.prepare(`
         INSERT INTO request_logs (
           created_at, model, original_tokens, optimized_tokens, tokens_saved,
           saved_percent, estimated_savings_usd, actual_cost_usd, cached_tokens,
@@ -126,8 +171,10 @@ export async function saveRequestLog(entry) {
           deduped, compressed, streaming, client, actual_route,
           provider_request_id, started_at, ended_at,
           stream_completed, client_disconnected, timed_out,
-          output_tokens_received, provider_usage_reported, charge_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          output_tokens_received, provider_usage_reported, charge_status,
+          context_used_percent, compaction_recommended, files_read_count,
+          relevant_files_count, tool_results_preserved, optimization_rules_applied
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         row.created_at, row.model, row.original_tokens, row.optimized_tokens,
         row.tokens_saved, row.saved_percent, row.estimated_savings_usd,
@@ -140,9 +187,12 @@ export async function saveRequestLog(entry) {
         row.provider_request_id, row.started_at, row.ended_at,
         row.stream_completed, row.client_disconnected, row.timed_out,
         row.output_tokens_received, row.provider_usage_reported, row.charge_status,
+        row.context_used_percent, row.compaction_recommended, row.files_read_count,
+        row.relevant_files_count, row.tool_results_preserved, row.optimization_rules_applied,
       );
+      const insertedId = Number(insertResult.lastInsertRowid);
       db.close();
-      return { path: REQUEST_LOG_DB, format: 'sqlite' };
+      return { path: REQUEST_LOG_DB, format: 'sqlite', id: insertedId };
     }
   } catch {
     // Fall back to JSONL when node:sqlite is unavailable or disabled.
@@ -184,7 +234,8 @@ export async function readSavingsStats(period = 'all') {
           COALESCE(SUM(CASE WHEN route_tier = 'mid' THEN 1 ELSE 0 END), 0) AS mid_count,
           COALESCE(SUM(CASE WHEN route_tier = 'async' THEN 1 ELSE 0 END), 0) AS async_count,
           COALESCE(SUM(CASE WHEN route_tier = 'premium' THEN 1 ELSE 0 END), 0) AS premium_count,
-          COALESCE(SUM(route_fallback_used), 0) AS fallbacks_used
+          COALESCE(SUM(route_fallback_used), 0) AS fallbacks_used,
+          COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count
         FROM request_logs ${where}
       `).get();
       db.close();
@@ -278,8 +329,102 @@ export async function readRequestById(id) {
   try { return { ...JSON.parse(line), id }; } catch { return null; }
 }
 
+export async function saveEvalPayload({ requestId, originalMessages, optimizedMessages, removedBlocks, model }) {
+  try {
+    const db = await initDatabase();
+    if (!db) return;
+    db.prepare(`
+      INSERT OR REPLACE INTO eval_payloads (request_id, created_at, original_messages, optimized_messages, removed_blocks, model)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      requestId,
+      new Date().toISOString(),
+      JSON.stringify(originalMessages),
+      JSON.stringify(optimizedMessages),
+      JSON.stringify(removedBlocks || []),
+      model || null,
+    );
+    db.close();
+  } catch { /* SQLite unavailable */ }
+}
+
+export async function readEvalPayload(requestId) {
+  try {
+    const db = await initDatabase();
+    if (!db) return null;
+    const row = db.prepare('SELECT * FROM eval_payloads WHERE request_id = ?').get(requestId);
+    db.close();
+    if (!row) return null;
+    return {
+      ...row,
+      original_messages: JSON.parse(row.original_messages),
+      optimized_messages: JSON.parse(row.optimized_messages),
+      removed_blocks: row.removed_blocks ? JSON.parse(row.removed_blocks) : [],
+    };
+  } catch { return null; }
+}
+
+export async function saveEvalResult(result) {
+  try {
+    const db = await initDatabase();
+    if (!db) return;
+    db.prepare(`
+      INSERT OR REPLACE INTO eval_results (
+        request_id, created_at, safe, original_output, optimized_output,
+        output_length_delta, tool_calls_match, finish_reason_match,
+        missing_context_complaint, latency_original_ms, latency_optimized_ms,
+        token_usage_original, token_usage_optimized
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      result.requestId,
+      new Date().toISOString(),
+      result.safe ? 1 : 0,
+      JSON.stringify(result.originalOutput ?? null),
+      JSON.stringify(result.optimizedOutput ?? null),
+      result.outputLengthDelta ?? null,
+      result.toolCallsMatch ? 1 : 0,
+      result.finishReasonMatch ? 1 : 0,
+      result.missingContextComplaint ? 1 : 0,
+      result.latencyOriginalMs ?? null,
+      result.latencyOptimizedMs ?? null,
+      JSON.stringify(result.tokenUsageOriginal ?? {}),
+      JSON.stringify(result.tokenUsageOptimized ?? {}),
+    );
+    db.close();
+  } catch { /* SQLite unavailable */ }
+}
+
+export async function readEvalResult(requestId) {
+  try {
+    const db = await initDatabase();
+    if (!db) return null;
+    const row = db.prepare('SELECT * FROM eval_results WHERE request_id = ?').get(requestId);
+    db.close();
+    if (!row) return null;
+    return {
+      ...row,
+      original_output: row.original_output ? JSON.parse(row.original_output) : null,
+      optimized_output: row.optimized_output ? JSON.parse(row.optimized_output) : null,
+      token_usage_original: row.token_usage_original ? JSON.parse(row.token_usage_original) : {},
+      token_usage_optimized: row.token_usage_optimized ? JSON.parse(row.token_usage_optimized) : {},
+    };
+  } catch { return null; }
+}
+
+export async function listEvalPayloads({ limit = 20 } = {}) {
+  try {
+    const db = await initDatabase();
+    if (!db) return [];
+    const rows = db.prepare(
+      'SELECT request_id, created_at, model FROM eval_payloads ORDER BY id DESC LIMIT ?'
+    ).all(limit);
+    db.close();
+    return rows;
+  } catch { return []; }
+}
+
 function readStatsFromJsonl(cutoff) {
-  const zero = { requests: 0, total_original: 0, total_optimized: 0, total_saved: 0, total_context_tokens_removed: 0, total_usd: 0, total_actual_cost: 0, total_cached: 0, total_estimated_cache_eligible: 0, total_saved_vs_haiku: 0, total_saved_vs_sonnet: 0, avg_saved_pct: 0, avg_latency_ms: 0, fallbacks_used: 0 };
+  const zero = { requests: 0, total_original: 0, total_optimized: 0, total_saved: 0, total_context_tokens_removed: 0, total_usd: 0, total_actual_cost: 0, total_cached: 0, total_estimated_cache_eligible: 0, total_saved_vs_haiku: 0, total_saved_vs_sonnet: 0, avg_saved_pct: 0, avg_latency_ms: 0, fallbacks_used: 0, error_count: 0 };
   if (!existsSync(REQUEST_LOG_JSONL)) return zero;
 
   const lines = readFileSync(REQUEST_LOG_JSONL, 'utf8').trim().split('\n').filter(Boolean);
@@ -306,6 +451,7 @@ function readStatsFromJsonl(cutoff) {
     acc.async_count   += (r.route_tier === 'async'   ? 1 : 0);
     acc.premium_count += (r.route_tier === 'premium' ? 1 : 0);
     acc.fallbacks_used += (r.route_fallback_used ? 1 : 0);
+    acc.error_count   += ((r.status_code || 200) >= 400 ? 1 : 0);
     return acc;
   }, { ...zero, local_count: 0, mid_count: 0, async_count: 0, premium_count: 0 });
 

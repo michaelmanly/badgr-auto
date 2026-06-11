@@ -271,9 +271,8 @@ process.env.BADGR_AUTO_MID_BASE_URL      = onboardBase;
 process.env.BADGR_AUTO_EDGE_BASE_URL     = onboardBase;
 process.env.BADGR_AUTO_PREMIUM_BASE_URL  = onboardBase;
 process.env.BADGR_AUTO_ASYNC_BASE_URL    = onboardBase;
-process.env.BADGR_AUTO_API_KEY           = 'onboard-test-key';
+process.env.BADGR_API_KEY                = 'onboard-test-key';
 delete process.env.OPENAI_API_KEY;
-delete process.env.BADGR_API_KEY;
 process.env.BADGR_AUTO_PORT              = String(onboardProxyPort);
 process.env.BADGR_CONFIG_DIR             = onboardConfigDir;
 

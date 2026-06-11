@@ -4,7 +4,12 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from '
 
 export const PROXY_CONFIG_FILE = join(CONFIG_DIR, 'auto-config.json');
 export const PROXY_PID_FILE    = join(CONFIG_DIR, 'auto-proxy.pid');
-export const PROXY_PORT        = Number.parseInt(process.env.BADGR_AUTO_PORT || '8787', 10);
+export const PROXY_PORT_FILE   = join(CONFIG_DIR, 'auto-proxy.port');
+export const PROXY_PORT        = Number.parseInt(process.env.BADGR_AUTO_PORT || '51999', 10);
+// When no explicit port is set, try these in order until one is free.
+export const PROXY_PORTS = process.env.BADGR_AUTO_PORT
+  ? [PROXY_PORT]
+  : [51999, 52000, 52001];
 
 export const CONFIG_DEFAULTS = {
   upstreamProvider: 'badgr',
@@ -27,6 +32,7 @@ export const CONFIG_DEFAULTS = {
   routingMode: 'direct',
   tokenOptimization: true,
   savingsStats: true,
+  evalSampleRate: 0,
 };
 
 const ENV_URL_KEYS = {
@@ -81,6 +87,27 @@ export function writeProxyPid(pid) {
 export function clearProxyPid() {
   if (existsSync(PROXY_PID_FILE)) {
     try { unlinkSync(PROXY_PID_FILE); } catch { /* ignore */ }
+  }
+}
+
+export function writeProxyPort(port) {
+  mkdirSync(CONFIG_DIR, { recursive: true });
+  writeFileSync(PROXY_PORT_FILE, String(port), { encoding: 'utf8', mode: 0o600 });
+}
+
+export function readProxyPort() {
+  if (!existsSync(PROXY_PORT_FILE)) return PROXY_PORT;
+  try {
+    const port = parseInt(readFileSync(PROXY_PORT_FILE, 'utf8').trim(), 10);
+    return Number.isFinite(port) ? port : PROXY_PORT;
+  } catch {
+    return PROXY_PORT;
+  }
+}
+
+export function clearProxyPort() {
+  if (existsSync(PROXY_PORT_FILE)) {
+    try { unlinkSync(PROXY_PORT_FILE); } catch { /* ignore */ }
   }
 }
 

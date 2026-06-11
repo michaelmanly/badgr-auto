@@ -189,6 +189,40 @@ describe('readSavingsStats fallbacks_used', () => {
     expect(stats.requests).toBe(5);
     expect(stats.fallbacks_used).toBe(1); // only the premium/openclaw row has fallback=true
   });
+
+  it('counts error_count (status_code >= 400) correctly', async () => {
+    const stats = await readSavingsStats('all');
+    // Row 3 (aider, gpt-4o) has status_code 429 — only error row
+    expect(stats.error_count).toBe(1);
+  });
+});
+
+// ── statsCommand error_count display ─────────────────────────────────────
+
+describe('statsCommand error_count display', () => {
+  it('shows Errors line when error_count > 0', async () => {
+    const { statsCommand } = await import('../src/commands/stats.js');
+    const lines = [];
+    const mockChalk = new Proxy({}, {
+      get: (_, p) => {
+        if (p === 'bold' || p === 'dim' || p === 'green' || p === 'cyan' || p === 'yellow' || p === 'red' || p === 'blue') {
+          return (s) => s;
+        }
+        return undefined;
+      },
+    });
+    const origLog = console.log;
+    const origErr = console.error;
+    console.log = (...a) => lines.push(a.join(' '));
+    console.error = (...a) => lines.push(a.join(' '));
+    await statsCommand(mockChalk, ['all']);
+    console.log = origLog;
+    console.error = origErr;
+
+    const body = lines.join('\n');
+    expect(body).toMatch(/Errors/i);
+    expect(body).toMatch(/1/); // one error row in the dataset
+  });
 });
 
 // ── receiptsCommand output ────────────────────────────────────────────────
@@ -443,5 +477,74 @@ describe('receiptCommand --export', () => {
     // With our no-op chalk mock, output should be pure text
     const body = lines.join('\n');
     expect(body).not.toMatch(/\x1b\[/); // no ANSI escape sequences
+  });
+});
+
+// ── receiptCommand context health display ────────────────────────────────
+
+describe('receiptCommand context health display', () => {
+  async function getReceiptOutput(requestLog) {
+    const { saveRequestLog: save, readRecentRequests: recent } = await import('../src/db.js');
+    const { receiptCommand } = await import('../src/commands/receipts.js');
+    await save(requestLog);
+    const rows = await recent({ limit: 1 });
+    const lines = [];
+    const mockChalk = new Proxy({}, {
+      get: (_, p) => {
+        if (['bold', 'dim', 'green', 'cyan', 'yellow', 'red', 'blue'].includes(p)) return (s) => s;
+        return undefined;
+      },
+    });
+    const origLog = console.log; console.log = (...a) => lines.push(a.join(' '));
+    await receiptCommand(mockChalk, [String(rows[0].id)]);
+    console.log = origLog;
+    return lines.join('\n');
+  }
+
+  it('shows "compact now" when context_used_percent >= 75', async () => {
+    const body = await getReceiptOutput({
+      model: 'gpt-4o', originalTokens: 100, optimizedTokens: 100,
+      tokensSaved: 0, savedPercent: 0, estimatedSavingsUsd: 0,
+      actualCostUsd: 0, cachedTokens: 0, contextTokensRemoved: 0,
+      estimatedSavingsVsHaiku: 0, estimatedSavingsVsSonnet: 0,
+      estimatedCacheEligibleTokens: 0, clientProfile: 'coding',
+      latencyMs: 100, statusCode: 200, routeTier: 'mid', preferredTier: 'mid',
+      routeReason: 'test', routeFallbackUsed: false,
+      latencyTargetMs: 5000, didDedupe: false, didCompress: false, streaming: false,
+      contextUsedPercent: 80,
+    });
+    expect(body).toMatch(/compact now/i);
+  });
+
+  it('shows "compact soon" when context_used_percent is 60–74', async () => {
+    const body = await getReceiptOutput({
+      model: 'gpt-4o', originalTokens: 100, optimizedTokens: 100,
+      tokensSaved: 0, savedPercent: 0, estimatedSavingsUsd: 0,
+      actualCostUsd: 0, cachedTokens: 0, contextTokensRemoved: 0,
+      estimatedSavingsVsHaiku: 0, estimatedSavingsVsSonnet: 0,
+      estimatedCacheEligibleTokens: 0, clientProfile: 'coding',
+      latencyMs: 100, statusCode: 200, routeTier: 'mid', preferredTier: 'mid',
+      routeReason: 'test', routeFallbackUsed: false,
+      latencyTargetMs: 5000, didDedupe: false, didCompress: false, streaming: false,
+      contextUsedPercent: 65,
+    });
+    expect(body).toMatch(/compact soon/i);
+  });
+
+  it('shows no compaction warning when context_used_percent < 60', async () => {
+    const body = await getReceiptOutput({
+      model: 'gpt-4o', originalTokens: 100, optimizedTokens: 100,
+      tokensSaved: 0, savedPercent: 0, estimatedSavingsUsd: 0,
+      actualCostUsd: 0, cachedTokens: 0, contextTokensRemoved: 0,
+      estimatedSavingsVsHaiku: 0, estimatedSavingsVsSonnet: 0,
+      estimatedCacheEligibleTokens: 0, clientProfile: 'coding',
+      latencyMs: 100, statusCode: 200, routeTier: 'mid', preferredTier: 'mid',
+      routeReason: 'test', routeFallbackUsed: false,
+      latencyTargetMs: 5000, didDedupe: false, didCompress: false, streaming: false,
+      contextUsedPercent: 40,
+    });
+    expect(body).toContain('Context used');
+    expect(body).not.toMatch(/compact now/i);
+    expect(body).not.toMatch(/compact soon/i);
   });
 });

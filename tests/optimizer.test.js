@@ -154,6 +154,52 @@ describe('optimizeMessages — conservative deduplication', () => {
     expect(result.removedBlocks).toHaveLength(0);
     expect(result.messages).toBe(messages); // same reference — untouched
   });
+
+  it('staleness protection — git working-tree content is never deduped even when identical', () => {
+    // Messages containing git status output must not be deduplicated because
+    // they reflect mutable filesystem state that changes between turns.
+    const gitStatus = [
+      'On branch main',
+      'Changes not staged for commit:',
+      '  modified:   src/index.ts',
+      '  deleted:    src/old.ts',
+      'Untracked files:',
+      '  src/new.ts',
+    ].join('\n');
+
+    const messages = [
+      { role: 'system', content: 'You are a coding assistant.' },
+      { role: 'user', content: gitStatus },
+      { role: 'assistant', content: 'I can see you have modified src/index.ts.' },
+      { role: 'user', content: gitStatus }, // same git output — must NOT be deduped
+    ];
+
+    const result = optimizeMessages(messages, { compressionThresholdTokens: 10000 });
+
+    expect(result.messages).toHaveLength(4); // nothing removed
+    expect(result.didDedupe).toBe(false);
+    expect(result.messages[3].content).toBe(gitStatus);
+  });
+
+  it('staleness protection — uncommitted changes message is preserved', () => {
+    const uncommitted = 'You have uncommitted changes in the working tree.';
+    const messages = [
+      { role: 'user', content: uncommitted },
+      { role: 'user', content: uncommitted },
+    ];
+    const result = optimizeMessages(messages, { compressionThresholdTokens: 10000 });
+    expect(result.messages).toHaveLength(2);
+  });
+
+  it('staleness protection — nothing to commit message is preserved', () => {
+    const clean = 'nothing to commit, working tree clean';
+    const messages = [
+      { role: 'user', content: clean },
+      { role: 'user', content: clean },
+    ];
+    const result = optimizeMessages(messages, { compressionThresholdTokens: 10000 });
+    expect(result.messages).toHaveLength(2);
+  });
 });
 
 describe('detectClientProfile', () => {

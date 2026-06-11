@@ -65,6 +65,13 @@ describe('classifyRequest', () => {
     }
   });
 
+  it('classifies review and design as normal — do not overuse Claude', () => {
+    for (const kw of ['review', 'design']) {
+      const req = { messages: [{ role: 'user', content: `Please ${kw} this function.` }] };
+      expect(classifyRequest(req), `expected '${kw}' → normal, not hard`).toBe('normal');
+    }
+  });
+
   it('classifies as hard when a hard keyword is present', () => {
     const req = { messages: [{ role: 'user', content: 'Describe the security posture of this codebase.' }] };
     expect(classifyRequest(req)).toBe('hard');

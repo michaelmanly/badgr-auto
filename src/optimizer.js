@@ -73,13 +73,34 @@ function hasProtectedAgentData(message = {}) {
   );
 }
 
+// Working tree / git state patterns — content that reflects a specific snapshot of the
+// file system at a point in time. Deduplicating across turns could silently drop a
+// newer tree state, so we never remove these even when the text is identical.
+const WORKING_TREE_PATTERNS = [
+  /^modified:\s+\S+/im,
+  /^deleted:\s+\S+/im,
+  /^new file:\s+\S+/im,
+  /^renamed:\s+\S+ ->/im,
+  /working tree (clean|changed|dirty)/i,
+  /uncommitted changes/i,
+  /changes not staged for commit/i,
+  /nothing to commit/i,
+];
+
+function hasWorkingTreeContent(text) {
+  return WORKING_TREE_PATTERNS.some(p => p.test(text));
+}
+
 // Conservative deduplication rules:
 // - system messages are static instructions — always safe to dedupe
 // - tool calls, results, and IDs are protected — never deduped
+// - working tree / git state content is never deduped (staleness protection)
 // - user/assistant messages are only deduped when classifyBlockType returns a type
 // - natural-language conversation has no block type and is never deduped
 function isDeduplicatable(message) {
   if (hasProtectedAgentData(message)) return false;
+  const text = contentToText(message?.content);
+  if (hasWorkingTreeContent(text)) return false;
   if (message.role === 'system') return true;
   return classifyBlockType(message.content) !== null;
 }

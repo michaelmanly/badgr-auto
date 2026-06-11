@@ -1,9 +1,12 @@
+// Hard: tasks that genuinely require the most capable model — deep reasoning, cross-repo
+// understanding, security analysis. Keep this list conservative. When unsure, use OSS cloud.
 const HARD_KEYWORDS = [
   'architecture', 'analyze', 'analyse',
-  'design', 'review', 'explain repo', 'codebase', 'security',
+  'explain repo', 'codebase', 'security',
 ];
 
-const MEDIUM_KEYWORDS = ['debug', 'refactor', 'implement'];
+// Medium: normal development work — routes to OSS cloud, never local or premium.
+const MEDIUM_KEYWORDS = ['debug', 'refactor', 'implement', 'review', 'design'];
 
 export function estimatePromptTokens(messages) {
   if (!Array.isArray(messages)) return 0;

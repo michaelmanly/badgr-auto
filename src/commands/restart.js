@@ -1,7 +1,7 @@
 import { stopCommand } from './stop.js';
 import { loadConfig } from '../config.js';
 import {
-  saveProxyConfig, writeProxyPid, clearProxyPid, readProxyPid, PROXY_PORT,
+  saveProxyConfig, writeProxyPid, clearProxyPid, readProxyPid, PROXY_PORTS, readProxyPort,
 } from '../proxy-config.js';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
@@ -11,7 +11,6 @@ import { waitForProxy } from '../wait-for-proxy.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 const PROXY_SCRIPT = join(__dirname, '..', 'proxy-server.js');
-const PROXY_URL    = `http://localhost:${PROXY_PORT}/v1`;
 
 export async function restartCommand(chalk) {
   stopCommand(chalk);
@@ -28,11 +27,11 @@ export async function restartCommand(chalk) {
   writeProxyPid(child.pid);
 
   process.stdout.write('  Starting proxy…');
-  const ready = await waitForProxy(PROXY_PORT);
+  const ready = await waitForProxy(PROXY_PORTS);
   process.stdout.write('\r' + ' '.repeat(30) + '\r');
 
   if (ready) {
-    console.log(chalk.green(`\n  ✓ Badgr Auto restarted at ${PROXY_URL}\n`));
+    console.log(chalk.green(`\n  ✓ Badgr Auto restarted at http://localhost:${readProxyPort()}/v1\n`));
   } else {
     const pid = readProxyPid();
     if (pid) {

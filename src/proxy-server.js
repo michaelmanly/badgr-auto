@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Badgr Token Proxy — OpenAI-compatible proxy (default http://localhost:8787/v1).
+ * Badgr Token Proxy — OpenAI-compatible proxy (default http://localhost:51999/v1).
  * Dedupes/compresses context, routes to cheapest tier, logs token savings.
  * Supports streaming (text/event-stream) and buffered JSON responses.
  */
@@ -8,13 +8,14 @@
 import http from 'node:http';
 import { Readable } from 'node:stream';
 import { loadConfig, DEFAULT_UPSTREAM_BASE_URL } from './config.js';
-import { loadProxyConfig, PROXY_PORT } from './proxy-config.js';
+import { loadProxyConfig, PROXY_PORT, PROXY_PORTS, writeProxyPort } from './proxy-config.js';
 import { countTokens } from './token-counter.js';
 import { optimizeMessages } from './optimizer.js';
 import { estimateSavings, estimateHaikuCost, estimateSonnetCost } from './pricing.js';
-import { saveRequestLog } from './db.js';
+import { saveRequestLog, saveEvalPayload } from './db.js';
 import { routeRequest } from './router.js';
 import { trackRequest, trackError } from './analytics.js';
+import { computeContextHealth } from './context-health.js';
 
 function pushSavingsToBackend(entry) {
   const proxyConfig = loadProxyConfig();
@@ -117,7 +118,6 @@ function getUpstreamApiKey(baseUrl, reqHeaders = {}) {
   const clientKey = extractBearer(reqHeaders);
   const badgrKey =
     loadConfig().apiKey ||
-    process.env.BADGR_AUTO_API_KEY ||
     process.env.BADGR_API_KEY ||
     '';
   if (isDirectOpenAiUpstream(baseUrl)) {
@@ -288,6 +288,12 @@ function buildLogEntry(fields) {
     outputTokensReceived: fields.outputTokensReceived ?? 0,
     providerUsageReported: fields.providerUsageReported ?? false,
     chargeStatus: fields.chargeStatus ?? null,
+    contextUsedPercent: fields.contextHealth?.usedPercent ?? null,
+    compactionRecommended: fields.contextHealth?.compactionRecommended ?? false,
+    filesReadCount: fields.receiptFields?.filesReadCount ?? 0,
+    relevantFilesCount: fields.receiptFields?.relevantFilesCount ?? 0,
+    toolResultsPreserved: fields.receiptFields?.toolResultsPreserved ?? 0,
+    optimizationRulesApplied: fields.receiptFields?.optimizationRulesApplied ?? [],
   };
 }
 
@@ -298,13 +304,359 @@ function computeChargeStatus({ statusCode, clientDisconnected, timedOut, provide
   return 'unknown';
 }
 
+const FILE_PATH_RE = /\b[\w\-./]+\.(?:js|ts|py|go|rs|java|tsx|jsx|json|yaml|yml|md|sh|css|html|rb|c|cpp|h)\b/i;
+
+function computeReceiptFields(optimizedMessages, removedBlocks) {
+  const toolResultsPreserved = (optimizedMessages || []).filter(
+    m => m.role === 'tool' || m.tool_call_id
+  ).length;
+
+  const filesReadCount = (optimizedMessages || []).filter(
+    m => (m.role === 'tool' || m.tool_call_id) &&
+      FILE_PATH_RE.test(typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? ''))
+  ).length;
+
+  const optimizationRulesApplied = [...new Set(
+    (removedBlocks || []).map(b => b.reason).filter(Boolean)
+  )];
+
+  return { toolResultsPreserved, filesReadCount, relevantFilesCount: filesReadCount, optimizationRulesApplied };
+}
+
+function _maybeStoreEvalPayload(savedLog, proxyConfig, requestData, optimized, model) {
+  const rate = proxyConfig.evalSampleRate ?? 0;
+  if (rate <= 0 || !savedLog?.id || Math.random() >= rate) return;
+  saveEvalPayload({
+    requestId: savedLog.id,
+    originalMessages: requestData.messages || [],
+    optimizedMessages: optimized.messages,
+    removedBlocks: optimized.removedBlocks || [],
+    model,
+  }).catch(() => {});
+}
+
+// ── Anthropic Messages API helpers ──────────────────────────────────────────
+
+function anthropicMessagesToOpenAI(messages = [], system) {
+  const result = [];
+
+  if (system) {
+    const systemText = typeof system === 'string'
+      ? system
+      : (Array.isArray(system)
+        ? system.filter(b => b.type === 'text').map(b => b.text || '').join('')
+        : String(system));
+    result.push({ role: 'system', content: systemText });
+  }
+
+  for (const msg of messages) {
+    if (msg.role === 'user') {
+      const content = msg.content;
+      if (typeof content === 'string') {
+        result.push({ role: 'user', content });
+      } else if (Array.isArray(content)) {
+        const toolResults = content.filter(b => b.type === 'tool_result');
+        const textBlocks = content.filter(b => b.type === 'text');
+
+        for (const tr of toolResults) {
+          const toolContent = typeof tr.content === 'string'
+            ? tr.content
+            : (Array.isArray(tr.content)
+              ? tr.content.filter(b => b.type === 'text').map(b => b.text || '').join('')
+              : '');
+          result.push({ role: 'tool', tool_call_id: tr.tool_use_id, content: toolContent });
+        }
+
+        if (textBlocks.length > 0) {
+          const text = textBlocks.map(b => b.text || '').join('');
+          result.push({ role: 'user', content: text });
+        }
+      }
+    } else if (msg.role === 'assistant') {
+      const content = msg.content;
+      if (typeof content === 'string') {
+        result.push({ role: 'assistant', content });
+      } else if (Array.isArray(content)) {
+        const textBlocks = content.filter(b => b.type === 'text');
+        const toolUseBlocks = content.filter(b => b.type === 'tool_use');
+        const assistantMsg = { role: 'assistant' };
+        if (textBlocks.length > 0) assistantMsg.content = textBlocks.map(b => b.text || '').join('');
+        if (toolUseBlocks.length > 0) {
+          assistantMsg.tool_calls = toolUseBlocks.map(b => ({
+            id: b.id,
+            type: 'function',
+            function: { name: b.name, arguments: JSON.stringify(b.input || {}) },
+          }));
+        }
+        result.push(assistantMsg);
+      }
+    }
+  }
+
+  return result;
+}
+
+function anthropicToOpenAIRequest(requestData) {
+  const messages = anthropicMessagesToOpenAI(requestData.messages, requestData.system);
+  const openAIReq = {
+    model: requestData.model,
+    messages,
+    stream: requestData.stream || false,
+  };
+
+  if (requestData.max_tokens) openAIReq.max_tokens = requestData.max_tokens;
+  if (requestData.temperature !== undefined) openAIReq.temperature = requestData.temperature;
+  if (requestData.top_p !== undefined) openAIReq.top_p = requestData.top_p;
+  if (requestData.stop_sequences) openAIReq.stop = requestData.stop_sequences;
+
+  if (requestData.tools && requestData.tools.length > 0) {
+    openAIReq.tools = requestData.tools.map(t => ({
+      type: 'function',
+      function: {
+        name: t.name,
+        description: t.description || '',
+        parameters: t.input_schema || { type: 'object', properties: {} },
+      },
+    }));
+    if (requestData.tool_choice) {
+      const tc = requestData.tool_choice;
+      if (tc.type === 'auto') openAIReq.tool_choice = 'auto';
+      else if (tc.type === 'any') openAIReq.tool_choice = 'required';
+      else if (tc.type === 'tool') openAIReq.tool_choice = { type: 'function', function: { name: tc.name } };
+    }
+  }
+
+  return openAIReq;
+}
+
+const FINISH_REASON_TO_ANTHROPIC = {
+  stop: 'end_turn',
+  tool_calls: 'tool_use',
+  length: 'max_tokens',
+  content_filter: 'stop_sequence',
+};
+
+function openAIToAnthropicResponse(openAIData, originalModel, msgId) {
+  const choice = openAIData?.choices?.[0];
+  const message = choice?.message;
+  const content = [];
+
+  if (message?.content) content.push({ type: 'text', text: message.content });
+  if (Array.isArray(message?.tool_calls)) {
+    for (const tc of message.tool_calls) {
+      let input = {};
+      try { input = JSON.parse(tc.function.arguments || '{}'); } catch { input = {}; }
+      content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input });
+    }
+  }
+
+  const usage = openAIData?.usage || {};
+  return {
+    id: msgId,
+    type: 'message',
+    role: 'assistant',
+    model: originalModel,
+    content,
+    stop_reason: FINISH_REASON_TO_ANTHROPIC[choice?.finish_reason] || 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: usage.prompt_tokens || 0, output_tokens: usage.completion_tokens || 0 },
+  };
+}
+
+async function streamOpenAIToAnthropic(upstreamResponse, res, originalModel, msgId) {
+  function sseWrite(event, data) {
+    if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  }
+
+  sseWrite('message_start', {
+    type: 'message_start',
+    message: {
+      id: msgId, type: 'message', role: 'assistant', model: originalModel,
+      content: [], stop_reason: null, stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    },
+  });
+  sseWrite('ping', { type: 'ping' });
+
+  let nextBlockIndex = 0;
+  let textBlockIndex = -1;
+  const toolBlockMap = {};
+  let stopReason = 'end_turn';
+  let outputTokens = 0;
+  let inputTokens = 0;
+  let sseBuffer = '';
+
+  try {
+    for await (const chunk of Readable.fromWeb(upstreamResponse.body)) {
+      sseBuffer += chunk.toString('utf8');
+      const lines = sseBuffer.split('\n');
+      sseBuffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const rawData = line.slice(6).trim();
+        if (rawData === '[DONE]') continue;
+        let parsed;
+        try { parsed = JSON.parse(rawData); } catch { continue; }
+
+        const choice = parsed?.choices?.[0];
+        const delta = choice?.delta;
+        if (parsed?.usage) {
+          inputTokens = parsed.usage.prompt_tokens || 0;
+          outputTokens = parsed.usage.completion_tokens || 0;
+        }
+        if (choice?.finish_reason && choice.finish_reason !== 'null') {
+          stopReason = FINISH_REASON_TO_ANTHROPIC[choice.finish_reason] || 'end_turn';
+        }
+        if (!delta) continue;
+
+        if (typeof delta.content === 'string' && delta.content.length > 0) {
+          if (textBlockIndex === -1) {
+            textBlockIndex = nextBlockIndex++;
+            sseWrite('content_block_start', {
+              type: 'content_block_start', index: textBlockIndex,
+              content_block: { type: 'text', text: '' },
+            });
+          }
+          sseWrite('content_block_delta', {
+            type: 'content_block_delta', index: textBlockIndex,
+            delta: { type: 'text_delta', text: delta.content },
+          });
+        }
+
+        if (Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            const tcIdx = typeof tc.index === 'number' ? tc.index : 0;
+            if (!(tcIdx in toolBlockMap)) {
+              const aIdx = nextBlockIndex++;
+              toolBlockMap[tcIdx] = aIdx;
+              sseWrite('content_block_start', {
+                type: 'content_block_start', index: aIdx,
+                content_block: { type: 'tool_use', id: tc.id || `toolu_${aIdx}`, name: tc.function?.name || '', input: {} },
+              });
+            }
+            if (tc.function?.arguments) {
+              sseWrite('content_block_delta', {
+                type: 'content_block_delta', index: toolBlockMap[tcIdx],
+                delta: { type: 'input_json_delta', partial_json: tc.function.arguments },
+              });
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    process.stderr.write(`[badgr-token-proxy] /v1/messages stream error: ${err.message}\n`);
+  }
+
+  if (textBlockIndex !== -1) sseWrite('content_block_stop', { type: 'content_block_stop', index: textBlockIndex });
+  for (const aIdx of Object.values(toolBlockMap)) sseWrite('content_block_stop', { type: 'content_block_stop', index: aIdx });
+  sseWrite('message_delta', { type: 'message_delta', delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: outputTokens } });
+  sseWrite('message_stop', { type: 'message_stop' });
+  if (!res.writableEnded) res.end();
+
+  return { stopReason, inputTokens, outputTokens };
+}
+
+// ── Legacy completions (FIM / text completions) helpers ─────────────────────
+
+function legacyCompletionToChatRequest(requestData) {
+  const prompt = requestData.prompt || '';
+  const suffix = requestData.suffix || '';
+
+  let userContent;
+  if (suffix) {
+    userContent = `Complete the code. Output only the inserted text, nothing else.\n<prefix>${prompt}</prefix>\n<suffix>${suffix}</suffix>`;
+  } else {
+    userContent = `Continue the following text. Output only the continuation, nothing else:\n${prompt}`;
+  }
+
+  const chatReq = {
+    model: requestData.model,
+    messages: [{ role: 'user', content: userContent }],
+    stream: requestData.stream || false,
+  };
+  if (requestData.max_tokens) chatReq.max_tokens = requestData.max_tokens;
+  if (requestData.temperature !== undefined) chatReq.temperature = requestData.temperature;
+  if (requestData.top_p !== undefined) chatReq.top_p = requestData.top_p;
+  if (requestData.stop) chatReq.stop = requestData.stop;
+  return chatReq;
+}
+
+function chatResponseToLegacyCompletion(openAIData, completionId, originalModel) {
+  const choice = openAIData?.choices?.[0];
+  const text = choice?.message?.content || '';
+  const usage = openAIData?.usage || {};
+  return {
+    id: completionId,
+    object: 'text_completion',
+    created: Math.floor(Date.now() / 1000),
+    model: originalModel || openAIData?.model || '',
+    choices: [{ text, index: 0, logprobs: null, finish_reason: choice?.finish_reason || 'stop' }],
+    usage: {
+      prompt_tokens: usage.prompt_tokens || 0,
+      completion_tokens: usage.completion_tokens || 0,
+      total_tokens: usage.total_tokens || 0,
+    },
+  };
+}
+
+async function streamChatToLegacyCompletion(upstreamResponse, res, completionId, originalModel) {
+  let sseBuffer = '';
+  let outputTokens = 0;
+  let inputTokens = 0;
+
+  try {
+    for await (const chunk of Readable.fromWeb(upstreamResponse.body)) {
+      sseBuffer += chunk.toString('utf8');
+      const lines = sseBuffer.split('\n');
+      sseBuffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const rawData = line.slice(6).trim();
+
+        if (rawData === '[DONE]') {
+          if (!res.writableEnded) res.write('data: [DONE]\n\n');
+          continue;
+        }
+
+        let parsed;
+        try { parsed = JSON.parse(rawData); } catch { continue; }
+
+        const choice = parsed?.choices?.[0];
+        const text = choice?.delta?.content || '';
+        if (parsed?.usage) {
+          inputTokens = parsed.usage.prompt_tokens || 0;
+          outputTokens = parsed.usage.completion_tokens || 0;
+        }
+
+        const legacyChunk = {
+          id: completionId,
+          object: 'text_completion',
+          created: Math.floor(Date.now() / 1000),
+          model: originalModel,
+          choices: [{ text, index: 0, logprobs: null, finish_reason: choice?.finish_reason || null }],
+        };
+        if (!res.writableEnded) res.write(`data: ${JSON.stringify(legacyChunk)}\n\n`);
+      }
+    }
+  } catch (err) {
+    process.stderr.write(`[badgr-token-proxy] /v1/completions stream error: ${err.message}\n`);
+  }
+
+  if (!res.writableEnded) res.end();
+  return { inputTokens, outputTokens };
+}
+
 const server = http.createServer(async (req, res) => {
   const url = req.url || '/';
   const method = req.method || 'GET';
 
   // ── Health ──────────────────────────────────────────────────────────────────
   if (method === 'GET' && url === '/health') {
-    jsonResponse(res, 200, { status: 'ok', proxy: 'badgr-token-proxy', base_url: `http://localhost:${PROXY_PORT}/v1` });
+    const boundPort = server.address()?.port ?? PROXY_PORT;
+    jsonResponse(res, 200, { status: 'ok', proxy: 'badgr-token-proxy', base_url: `http://localhost:${boundPort}/v1` });
     return;
   }
 
@@ -457,9 +809,12 @@ const server = http.createServer(async (req, res) => {
       const endedAtIso = new Date().toISOString();
       const chargeStatus = computeChargeStatus({ statusCode: upstreamResponse.status, clientDisconnected, timedOut: false, providerUsageReported });
       const latencyMs = firstChunkAt ? firstChunkAt - startedAt : Date.now() - startedAt;
-      const entry = buildLogEntry({ model, originalTokens, optimizedTokens, savings, route, optimized, cachedTokens: 0, latencyMs, statusCode: upstreamResponse.status, streaming: true, clientHeaders: badgrClientHeaders, providerRequestId, startedAtIso, endedAtIso, streamCompleted, clientDisconnected, timedOut: false, outputTokensReceived, providerUsageReported, chargeStatus });
+      const contextHealth = computeContextHealth(optimizedTokens, model);
+      const receiptFields = computeReceiptFields(optimized.messages, optimized.removedBlocks);
+      const entry = buildLogEntry({ model, originalTokens, optimizedTokens, savings, route, optimized, cachedTokens: 0, latencyMs, statusCode: upstreamResponse.status, streaming: true, clientHeaders: badgrClientHeaders, providerRequestId, startedAtIso, endedAtIso, streamCompleted, clientDisconnected, timedOut: false, outputTokensReceived, providerUsageReported, chargeStatus, contextHealth, receiptFields });
       logSavings(entry);
-      await saveRequestLog(entry);
+      const savedLog = await saveRequestLog(entry);
+      _maybeStoreEvalPayload(savedLog, proxyConfig, requestData, optimized, model);
       pushSavingsToBackend(entry);
       trackRequest(entry);
       return;
@@ -484,9 +839,12 @@ const server = http.createServer(async (req, res) => {
     const bufferedOutputTokens = upstreamData?.usage?.completion_tokens ?? upstreamData?.usage?.output_tokens ?? 0;
     const bufferedUsageReported = !!(upstreamData?.usage);
     const bufferedChargeStatus = computeChargeStatus({ statusCode, clientDisconnected: false, timedOut: false, providerUsageReported: bufferedUsageReported });
-    const entry = buildLogEntry({ model, originalTokens, optimizedTokens, savings, route, optimized, cachedTokens, latencyMs, statusCode, streaming: false, clientHeaders: badgrClientHeaders, providerRequestId: bufferedProviderRequestId, startedAtIso: bufferedStartedAtIso, endedAtIso: bufferedEndedAtIso, streamCompleted: statusCode < 400, clientDisconnected: false, timedOut: false, outputTokensReceived: bufferedOutputTokens, providerUsageReported: bufferedUsageReported, chargeStatus: bufferedChargeStatus });
+    const bufferedContextHealth = computeContextHealth(optimizedTokens, model);
+    const bufferedReceiptFields = computeReceiptFields(optimized.messages, optimized.removedBlocks);
+    const entry = buildLogEntry({ model, originalTokens, optimizedTokens, savings, route, optimized, cachedTokens, latencyMs, statusCode, streaming: false, clientHeaders: badgrClientHeaders, providerRequestId: bufferedProviderRequestId, startedAtIso: bufferedStartedAtIso, endedAtIso: bufferedEndedAtIso, streamCompleted: statusCode < 400, clientDisconnected: false, timedOut: false, outputTokensReceived: bufferedOutputTokens, providerUsageReported: bufferedUsageReported, chargeStatus: bufferedChargeStatus, contextHealth: bufferedContextHealth, receiptFields: bufferedReceiptFields });
     logSavings(entry);
-    await saveRequestLog(entry);
+    const savedLog = await saveRequestLog(entry);
+    _maybeStoreEvalPayload(savedLog, proxyConfig, requestData, optimized, model);
     pushSavingsToBackend(entry);
     trackRequest(entry);
     if (statusCode >= 500) {
@@ -494,6 +852,341 @@ const server = http.createServer(async (req, res) => {
     }
     const bufferedBadgrHdrs = buildBadgrHeaders(originalTokens, optimizedTokens, savings, route, cachedTokens);
     jsonResponse(res, statusCode, upstreamData, bufferedBadgrHdrs);
+    return;
+  }
+
+  // ── Legacy text completions (FIM / autocomplete for Continue, Tabby, etc.) ─
+  if (method === 'POST' && url === '/v1/completions') {
+    let requestData;
+    try {
+      requestData = JSON.parse(await readBody(req));
+    } catch {
+      jsonResponse(res, 400, { error: { message: 'Invalid JSON body', type: 'invalid_request_error' } });
+      return;
+    }
+
+    const proxyConfig = loadProxyConfig();
+    const openAIRequest = legacyCompletionToChatRequest(requestData);
+
+    let route;
+    if (proxyConfig.routingMode === 'direct') {
+      const directModel = (openAIRequest.model && openAIRequest.model !== 'badgr-auto')
+        ? openAIRequest.model
+        : (proxyConfig.defaultModel || 'deepseek-chat');
+      route = {
+        preferredTier: 'edge', selectedTier: 'edge',
+        model: directModel,
+        baseUrl: proxyConfig.upstreamBaseUrl || proxyConfig.midBaseUrl,
+        reason: 'routing disabled — direct passthrough',
+        taskType: null, classification: null, promptTokens: 0,
+        latencyTargetMs: null, fallbackUsed: false,
+      };
+    } else {
+      route = routeRequest(openAIRequest, proxyConfig);
+    }
+
+    const model = route.model || openAIRequest.model || 'gpt-4o-mini';
+    const originalModel = requestData.model || model;
+    const startedAt = Date.now();
+    const completionId = `cmpl_${Date.now().toString(36)}`;
+
+    const badgrClientHeaders = {
+      'x-badgr-client': req.headers['x-badgr-client'] || '',
+      'x-badgr-task-type': req.headers['x-badgr-task-type'] || 'autocomplete',
+      'x-badgr-mode': req.headers['x-badgr-mode'] || '',
+    };
+
+    const originalTokens = countTokens(openAIRequest.messages || [], model);
+    const optimized = optimizeMessages(
+      openAIRequest.messages || [],
+      buildOptimizerOptions(proxyConfig, openAIRequest, badgrClientHeaders, model),
+    );
+    const optimizedRequest = { ...openAIRequest, model, messages: optimized.messages };
+    const optimizedTokens = countTokens(optimizedRequest.messages || [], model);
+    const savings = estimateSavings(originalTokens, optimizedTokens, model);
+
+    if (requestData.stream) {
+      const abort = new AbortController();
+      let clientDisconnected = false;
+      req.on('close', () => { clientDisconnected = true; abort.abort(); });
+
+      let upstreamResponse;
+      try {
+        upstreamResponse = await forwardStream('/chat/completions', optimizedRequest, req.headers, route.baseUrl, abort.signal);
+      } catch (err) {
+        const msg = abort.signal.aborted ? 'Client disconnected' : err.message;
+        jsonResponse(res, 502, { error: { message: msg, type: 'proxy_error' } });
+        return;
+      }
+
+      if (!upstreamResponse.ok) {
+        const errText = await upstreamResponse.text().catch(() => '');
+        let errData;
+        try { errData = errText ? JSON.parse(errText) : {}; } catch { errData = { error: { message: errText } }; }
+        jsonResponse(res, upstreamResponse.status, errData);
+        return;
+      }
+
+      const streamBadgrHdrs = buildBadgrHeaders(originalTokens, optimizedTokens, savings, route, 0);
+      res.writeHead(upstreamResponse.status, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+        ...streamBadgrHdrs,
+      });
+
+      const startedAtIso = new Date(startedAt).toISOString();
+      const { outputTokens: ot } = await streamChatToLegacyCompletion(upstreamResponse, res, completionId, originalModel);
+
+      const endedAtIso = new Date().toISOString();
+      const latencyMs = Date.now() - startedAt;
+      const contextHealth = computeContextHealth(optimizedTokens, model);
+      const receiptFields = computeReceiptFields(optimized.messages, optimized.removedBlocks);
+      const entry = buildLogEntry({
+        model, originalTokens, optimizedTokens, savings, route, optimized, cachedTokens: 0,
+        latencyMs, statusCode: upstreamResponse.status, streaming: true,
+        clientHeaders: badgrClientHeaders, providerRequestId: null, startedAtIso, endedAtIso,
+        streamCompleted: true, clientDisconnected, timedOut: false,
+        outputTokensReceived: ot, providerUsageReported: ot > 0,
+        chargeStatus: computeChargeStatus({ statusCode: upstreamResponse.status, clientDisconnected, timedOut: false, providerUsageReported: ot > 0 }),
+        contextHealth, receiptFields,
+      });
+      logSavings(entry);
+      const savedLog = await saveRequestLog(entry);
+      _maybeStoreEvalPayload(savedLog, proxyConfig, openAIRequest, optimized, model);
+      pushSavingsToBackend(entry);
+      trackRequest(entry);
+      return;
+    }
+
+    // Buffered path
+    let statusCode = 502;
+    let upstreamData;
+    try {
+      const upstream = await forwardJson('/chat/completions', optimizedRequest, req.headers, route.baseUrl);
+      statusCode = upstream.status;
+      upstreamData = upstream.data;
+    } catch (err) {
+      upstreamData = { error: { message: err.message, type: 'proxy_error' } };
+    }
+
+    if (statusCode >= 400) {
+      jsonResponse(res, statusCode, upstreamData);
+      return;
+    }
+
+    const completionResp = chatResponseToLegacyCompletion(upstreamData, completionId, originalModel);
+    const cachedTokensComp = extractCachedTokens(upstreamData);
+    const latencyMsComp = Date.now() - startedAt;
+    const bufferedOutputTokens = upstreamData?.usage?.completion_tokens ?? 0;
+    const bufferedUsageReported = !!(upstreamData?.usage);
+    const bufferedContextHealth = computeContextHealth(optimizedTokens, model);
+    const bufferedReceiptFields = computeReceiptFields(optimized.messages, optimized.removedBlocks);
+    const compEntry = buildLogEntry({
+      model, originalTokens, optimizedTokens, savings, route, optimized,
+      cachedTokens: cachedTokensComp, latencyMs: latencyMsComp, statusCode, streaming: false,
+      clientHeaders: badgrClientHeaders, providerRequestId: upstreamData?.id || null,
+      startedAtIso: new Date(startedAt).toISOString(), endedAtIso: new Date().toISOString(),
+      streamCompleted: true, clientDisconnected: false, timedOut: false,
+      outputTokensReceived: bufferedOutputTokens, providerUsageReported: bufferedUsageReported,
+      chargeStatus: computeChargeStatus({ statusCode, clientDisconnected: false, timedOut: false, providerUsageReported: bufferedUsageReported }),
+      contextHealth: bufferedContextHealth, receiptFields: bufferedReceiptFields,
+    });
+    logSavings(compEntry);
+    const savedCompLog = await saveRequestLog(compEntry);
+    _maybeStoreEvalPayload(savedCompLog, proxyConfig, openAIRequest, optimized, model);
+    pushSavingsToBackend(compEntry);
+    trackRequest(compEntry);
+    const compBadgrHdrs = buildBadgrHeaders(originalTokens, optimizedTokens, savings, route, cachedTokensComp);
+    jsonResponse(res, 200, completionResp, compBadgrHdrs);
+    return;
+  }
+
+  // ── Anthropic Messages API ────────────────────────────────────────────────
+  if (method === 'POST' && url === '/v1/messages') {
+    let requestData;
+    try {
+      requestData = JSON.parse(await readBody(req));
+    } catch {
+      jsonResponse(res, 400, { type: 'error', error: { type: 'invalid_request_error', message: 'Invalid JSON body' } });
+      return;
+    }
+
+    const proxyConfig = loadProxyConfig();
+    const openAIRequest = anthropicToOpenAIRequest(requestData);
+
+    let route;
+    if (proxyConfig.routingMode === 'direct') {
+      const directModel = (openAIRequest.model && openAIRequest.model !== 'badgr-auto')
+        ? openAIRequest.model
+        : (proxyConfig.defaultModel || 'deepseek-chat');
+      route = {
+        preferredTier: 'mid', selectedTier: 'mid',
+        model: directModel,
+        baseUrl: proxyConfig.upstreamBaseUrl || proxyConfig.midBaseUrl,
+        reason: 'routing disabled — direct passthrough',
+        taskType: null, classification: null, promptTokens: 0,
+        latencyTargetMs: null, fallbackUsed: false,
+      };
+    } else {
+      route = routeRequest(openAIRequest, proxyConfig);
+    }
+
+    const model = route.model || openAIRequest.model || 'gpt-4o-mini';
+    const originalModel = requestData.model;
+    const startedAt = Date.now();
+    const msgId = `msg_${Date.now().toString(36)}`;
+
+    const badgrClientHeaders = {
+      'x-badgr-client': req.headers['x-badgr-client'] || '',
+      'x-badgr-task-type': req.headers['x-badgr-task-type'] || '',
+      'x-badgr-mode': req.headers['x-badgr-mode'] || '',
+    };
+
+    const originalTokens = countTokens(openAIRequest.messages || [], model);
+    const optimized = optimizeMessages(
+      openAIRequest.messages || [],
+      buildOptimizerOptions(proxyConfig, openAIRequest, badgrClientHeaders, model),
+    );
+    const optimizedRequest = { ...openAIRequest, model, messages: optimized.messages };
+    const optimizedTokens = countTokens(optimizedRequest.messages || [], model);
+    const savings = estimateSavings(originalTokens, optimizedTokens, model);
+
+    if (requestData.stream) {
+      const abort = new AbortController();
+      let clientDisconnected = false;
+      req.on('close', () => { clientDisconnected = true; abort.abort(); });
+
+      let upstreamResponse;
+      try {
+        upstreamResponse = await forwardStream('/chat/completions', optimizedRequest, req.headers, route.baseUrl, abort.signal);
+      } catch (err) {
+        const msg = abort.signal.aborted ? 'Client disconnected before upstream responded' : err.message;
+        jsonResponse(res, 529, { type: 'error', error: { type: 'overloaded_error', message: msg } });
+        return;
+      }
+
+      if (!upstreamResponse.ok) {
+        const errText = await upstreamResponse.text().catch(() => '');
+        let errData;
+        try { errData = errText ? JSON.parse(errText) : {}; } catch { errData = { type: 'error', error: { type: 'api_error', message: errText } }; }
+        jsonResponse(res, upstreamResponse.status, errData);
+        return;
+      }
+
+      if (!upstreamResponse.body) {
+        jsonResponse(res, 529, { type: 'error', error: { type: 'overloaded_error', message: 'Upstream returned no body' } });
+        return;
+      }
+
+      const streamBadgrHdrs = buildBadgrHeaders(originalTokens, optimizedTokens, savings, route, 0);
+      res.writeHead(upstreamResponse.status, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+        ...streamBadgrHdrs,
+      });
+
+      const providerRequestId = upstreamResponse.headers.get('x-request-id') || null;
+      const startedAtIso = new Date(startedAt).toISOString();
+      const { stopReason: sr, outputTokens: ot } = await streamOpenAIToAnthropic(upstreamResponse, res, originalModel, msgId);
+
+      const endedAtIso = new Date().toISOString();
+      const latencyMs = Date.now() - startedAt;
+      const contextHealth = computeContextHealth(optimizedTokens, model);
+      const receiptFields = computeReceiptFields(optimized.messages, optimized.removedBlocks);
+      const streamEntry = buildLogEntry({
+        model, originalTokens, optimizedTokens, savings, route, optimized, cachedTokens: 0,
+        latencyMs, statusCode: upstreamResponse.status, streaming: true,
+        clientHeaders: badgrClientHeaders, providerRequestId, startedAtIso, endedAtIso,
+        streamCompleted: true, clientDisconnected, timedOut: false,
+        outputTokensReceived: ot, providerUsageReported: ot > 0,
+        chargeStatus: computeChargeStatus({ statusCode: upstreamResponse.status, clientDisconnected, timedOut: false, providerUsageReported: ot > 0 }),
+        contextHealth, receiptFields,
+      });
+      logSavings(streamEntry);
+      const savedStreamLog = await saveRequestLog(streamEntry);
+      _maybeStoreEvalPayload(savedStreamLog, proxyConfig, openAIRequest, optimized, model);
+      pushSavingsToBackend(streamEntry);
+      trackRequest(streamEntry);
+      return;
+    }
+
+    // Buffered path
+    let statusCode = 502;
+    let upstreamData;
+    try {
+      const upstream = await forwardJson('/chat/completions', optimizedRequest, req.headers, route.baseUrl);
+      statusCode = upstream.status;
+      upstreamData = upstream.data;
+    } catch (err) {
+      upstreamData = { error: { message: err.message, type: 'proxy_error' } };
+    }
+
+    if (statusCode >= 400) {
+      jsonResponse(res, statusCode, upstreamData);
+      return;
+    }
+
+    const cachedTokensMsgs = extractCachedTokens(upstreamData);
+    const latencyMsMsgs = Date.now() - startedAt;
+    const anthropicResp = openAIToAnthropicResponse(upstreamData, originalModel, msgId);
+    const bufferedUsageReported = !!(upstreamData?.usage);
+    const bufferedOutputTokens = upstreamData?.usage?.completion_tokens ?? 0;
+    const bufferedContextHealth = computeContextHealth(optimizedTokens, model);
+    const bufferedReceiptFields = computeReceiptFields(optimized.messages, optimized.removedBlocks);
+    const msgEntry = buildLogEntry({
+      model, originalTokens, optimizedTokens, savings, route, optimized,
+      cachedTokens: cachedTokensMsgs, latencyMs: latencyMsMsgs, statusCode, streaming: false,
+      clientHeaders: badgrClientHeaders, providerRequestId: upstreamData?.id || null,
+      startedAtIso: new Date(startedAt).toISOString(), endedAtIso: new Date().toISOString(),
+      streamCompleted: true, clientDisconnected: false, timedOut: false,
+      outputTokensReceived: bufferedOutputTokens, providerUsageReported: bufferedUsageReported,
+      chargeStatus: computeChargeStatus({ statusCode, clientDisconnected: false, timedOut: false, providerUsageReported: bufferedUsageReported }),
+      contextHealth: bufferedContextHealth, receiptFields: bufferedReceiptFields,
+    });
+    logSavings(msgEntry);
+    const savedMsgLog = await saveRequestLog(msgEntry);
+    _maybeStoreEvalPayload(savedMsgLog, proxyConfig, openAIRequest, optimized, model);
+    pushSavingsToBackend(msgEntry);
+    trackRequest(msgEntry);
+    const badgrHdrsMsgs = buildBadgrHeaders(originalTokens, optimizedTokens, savings, route, cachedTokensMsgs);
+    jsonResponse(res, 200, anthropicResp, badgrHdrsMsgs);
+    return;
+  }
+
+  // ── Generic passthrough for unrecognised /v1/* paths ─────────────────────
+  // Handles embeddings, audio, images, and any other OpenAI-compatible routes
+  // that tools may call (Continue, LangChain, LlamaIndex, etc.).
+  if ((method === 'GET' || method === 'POST' || method === 'DELETE') && url.startsWith('/v1/')) {
+    try {
+      const proxyConfig = loadProxyConfig();
+      const base = getUpstreamBaseUrl(proxyConfig, undefined);
+      const path = url.slice(3); // strip leading /v1 → /models, /embeddings, etc.
+      const isGetOrDelete = method === 'GET' || method === 'DELETE';
+      let bodyBuf;
+      if (!isGetOrDelete) {
+        const raw = await readBody(req);
+        bodyBuf = raw;
+      }
+      const upstreamUrl = `${base}${path}`;
+      const fetchOpts = {
+        method,
+        headers: {
+          accept: 'application/json',
+          ...upstreamHeaders(req.headers, base),
+          ...(bodyBuf ? { 'content-type': req.headers['content-type'] || 'application/json' } : {}),
+        },
+        body: bodyBuf || undefined,
+      };
+      const upstream = await fetch(upstreamUrl, fetchOpts);
+      const text = await upstream.text();
+      let data;
+      try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+      jsonResponse(res, upstream.status, data);
+    } catch (err) {
+      jsonResponse(res, 502, { error: { message: err.message, type: 'proxy_error' } });
+    }
     return;
   }
 
@@ -506,11 +1199,37 @@ export { server };
 import { fileURLToPath } from 'node:url';
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
-  server.listen(PROXY_PORT, '127.0.0.1', () => {
-    process.stderr.write(`[badgr-token-proxy] Listening on http://localhost:${PROXY_PORT}/v1\n`);
+  let portIdx = 0;
+
+  const tryNextPort = () => {
+    if (portIdx >= PROXY_PORTS.length) {
+      process.stderr.write(
+        `[badgr-token-proxy] All ports in use (tried: ${PROXY_PORTS.join(', ')}). ` +
+        `Set BADGR_AUTO_PORT to use a different port.\n`,
+      );
+      process.exit(1);
+    }
+    server.listen(PROXY_PORTS[portIdx], '127.0.0.1');
+  };
+
+  server.on('listening', () => {
+    const port = server.address().port;
+    writeProxyPort(port);
+    process.stderr.write(`[badgr-token-proxy] Listening on http://localhost:${port}/v1\n`);
   });
+
   server.on('error', (err) => {
-    process.stderr.write(`[badgr-token-proxy] Server error: ${err.message}\n`);
-    process.exit(1);
+    if (err.code === 'EADDRINUSE') {
+      process.stderr.write(
+        `[badgr-token-proxy] Port ${PROXY_PORTS[portIdx]} in use, trying ${PROXY_PORTS[portIdx + 1] ?? 'none'}...\n`,
+      );
+      portIdx++;
+      tryNextPort();
+    } else {
+      process.stderr.write(`[badgr-token-proxy] Server error: ${err.message}\n`);
+      process.exit(1);
+    }
   });
+
+  tryNextPort();
 }

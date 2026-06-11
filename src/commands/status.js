@@ -1,6 +1,4 @@
-import { isProxyRunning, readProxyPid, loadProxyConfig, PROXY_PORT } from '../proxy-config.js';
-
-const PROXY_URL = `http://localhost:${PROXY_PORT}/v1`;
+import { isProxyRunning, readProxyPid, loadProxyConfig, readProxyPort } from '../proxy-config.js';
 
 export function statusCommand(chalk) {
   const running = isProxyRunning();
@@ -11,7 +9,7 @@ export function statusCommand(chalk) {
   if (running) {
     console.log(chalk.green('  Badgr Token Proxy: running'));
     console.log(`  PID:       ${pid}`);
-    console.log(`  Base URL:  ${PROXY_URL}`);
+    console.log(`  Base URL:  http://localhost:${readProxyPort()}/v1`);
     console.log(`  Routing:   edge → mid → async → premium`);
     console.log(`  Default:   mid-tier (${cfg.midBaseUrl || cfg.upstreamBaseUrl})`);
     console.log(`  Threshold: ${cfg.compressionThresholdTokens.toLocaleString()} tokens`);
